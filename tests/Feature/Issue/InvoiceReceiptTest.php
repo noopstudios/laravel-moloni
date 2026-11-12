@@ -349,7 +349,7 @@ it('finishes a document whose id was saved before the job stopped, without inser
     expect($document->status)->toBe(DocumentStatus::Issued)
         ->and($document->document_number)->toBe('GR/8')
         ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0)
-        ->and(moloniRequests('invoiceReceipts/getAll'))->toHaveCount(0);
+        ->and(moloniRequests('documents/getAll'))->toHaveCount(0);
 });
 
 it('releases the job while another worker holds the document lock', function () {
@@ -472,3 +472,23 @@ it('resolves the manager from the facade as a singleton', function () {
     expect(Moloni::getFacadeRoot())->toBe(app(Noop\Moloni\Moloni::class))
         ->and(app(Noop\Moloni\Moloni::class))->toBe(app(Noop\Moloni\Moloni::class));
 });
+
+it('never issues a document in another company than the one it was requested for', function (DocumentStatus $status, DocumentStatus $expected) {
+    Http::fake();
+    $document = irPending();
+    $document->status = $status;
+    $document->save();
+    useMoloniSettings(['company_id' => 6]);
+
+    runIssueJob($document);
+
+    $document->refresh();
+    expect($document->status)->toBe($expected)
+        ->and($document->error_type)->toBe('company_changed');
+    Http::assertNothingSent();
+    Event::assertDispatched(DocumentFailed::class);
+})->with([
+    'pending' => [DocumentStatus::Pending, DocumentStatus::Failed],
+    'issuing' => [DocumentStatus::Issuing, DocumentStatus::Unknown],
+    'unknown' => [DocumentStatus::Unknown, DocumentStatus::Unknown],
+]);

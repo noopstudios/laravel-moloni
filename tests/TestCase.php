@@ -3,6 +3,7 @@
 namespace Noop\Moloni\Tests;
 
 use Noop\Moloni\MoloniServiceProvider;
+use Noop\Moloni\Tests\Fixtures\Order;
 use Orchestra\Testbench\TestCase as Orchestra;
 use Spatie\LaravelSettings\LaravelSettingsServiceProvider;
 
@@ -14,6 +15,13 @@ abstract class TestCase extends Orchestra
             LaravelSettingsServiceProvider::class,
             MoloniServiceProvider::class,
         ];
+    }
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Order::$invoiceDataUsing = null;
     }
 
     protected function defineEnvironment($app): void

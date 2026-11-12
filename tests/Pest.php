@@ -137,8 +137,7 @@ function fakeMoloniIssuing(array $overrides = []): void
         '*/taxExemptions/getAll/*' => [['code' => 'M07', 'at_code' => 'M07', 'name' => 'Isento artigo 9.º']],
         '*/invoices/insert/*' => ['valid' => 1, 'document_id' => 7001],
         '*/invoiceReceipts/insert/*' => ['valid' => 1, 'document_id' => 7001],
-        '*/invoices/getAll/*' => Http::response([]),
-        '*/invoiceReceipts/getAll/*' => Http::response([]),
+        '*/documents/getAll/*' => Http::response([]),
         '*/documents/getOne/*' => moloniDocumentRow(),
         ...$overrides,
     ]);

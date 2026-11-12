@@ -39,7 +39,7 @@ function rcUncertain(DocumentStatus $status = DocumentStatus::Unknown, string $v
 }
 
 it('adopts the existing Moloni document on the next run instead of inserting again', function () {
-    fakeMoloniIssuing(['*/invoiceReceipts/getAll/*' => [moloniDocumentRow(['document_id' => 7005, 'number' => 9])]]);
+    fakeMoloniIssuing(['*/documents/getAll/*' => [moloniDocumentRow(['document_id' => 7005, 'number' => 9])]]);
     $document = rcUncertain();
 
     runIssueJob($document);
@@ -53,14 +53,14 @@ it('adopts the existing Moloni document on the next run instead of inserting aga
         ->and($document->error_message)->toBeNull()
         ->and($document->attempts)->toBe(1);
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/insert/'));
-    Http::assertSent(fn (Request $request) => str_contains($request->url(), '/invoiceReceipts/getAll/')
+    Http::assertSent(fn (Request $request) => str_contains($request->url(), '/documents/getAll/')
         && $request['our_reference'] === '#ORDER-1'
         && $request['company_id'] === 5);
     Event::assertDispatched(DocumentIssued::class);
 });
 
 it('reconciles a document left issuing by a job that stopped', function () {
-    fakeMoloniIssuing(['*/invoiceReceipts/getAll/*' => [moloniDocumentRow()]]);
+    fakeMoloniIssuing(['*/documents/getAll/*' => [moloniDocumentRow()]]);
     $document = rcUncertain(DocumentStatus::Issuing);
 
     runIssueJob($document);
@@ -70,7 +70,7 @@ it('reconciles a document left issuing by a job that stopped', function () {
 });
 
 it('matches the reference exactly, ignoring #GR-10 when looking for #GR-1', function () {
-    fakeMoloniIssuing(['*/invoiceReceipts/getAll/*' => [moloniDocumentRow(['document_id' => 7010, 'our_reference' => '#GR-10'])]]);
+    fakeMoloniIssuing(['*/documents/getAll/*' => [moloniDocumentRow(['document_id' => 7010, 'our_reference' => '#GR-10'])]]);
     $document = rcUncertain();
     $document->reference = '#GR-1';
     $document->save();
@@ -86,7 +86,7 @@ it('matches the reference exactly, ignoring #GR-10 when looking for #GR-1', func
 });
 
 it('issues when Moloni has no document that matches', function (array $row) {
-    fakeMoloniIssuing(['*/invoiceReceipts/getAll/*' => [moloniDocumentRow(['document_id' => 7009, ...$row])]]);
+    fakeMoloniIssuing(['*/documents/getAll/*' => [moloniDocumentRow(['document_id' => 7009, ...$row])]]);
     InvoiceDocument::factory()->invoiceReceipt()->issued()->create(['company_id' => 5, 'document_id' => 7777]);
     $document = rcUncertain();
 
@@ -104,7 +104,7 @@ it('issues when Moloni has no document that matches', function (array $row) {
 ]);
 
 it('stays unknown when two closed documents share the reference', function () {
-    fakeMoloniIssuing(['*/invoiceReceipts/getAll/*' => [
+    fakeMoloniIssuing(['*/documents/getAll/*' => [
         moloniDocumentRow(['document_id' => 7005]),
         moloniDocumentRow(['document_id' => 7006, 'entity_vat' => 'PT509999999', 'net_value' => '123.00']),
     ]]);
@@ -123,7 +123,7 @@ it('stays unknown when two closed documents share the reference', function () {
 
 it('matches a final consumer by customer id when it is known, else by the generic VAT', function (?int $customerId, array $row, bool $adopted) {
     fakeMoloniIssuing([
-        '*/invoiceReceipts/getAll/*' => [moloniDocumentRow(['document_id' => 7005, ...$row])],
+        '*/documents/getAll/*' => [moloniDocumentRow(['document_id' => 7005, ...$row])],
         '*/customers/getByNumber/*' => [['customer_id' => 301, 'number' => 'GR26-C1F', 'vat' => '999999990', 'name' => 'Acme Lda']],
     ]);
     $document = rcUncertain(vat: '999999990', attributes: ['customer_id' => $customerId]);
@@ -139,7 +139,7 @@ it('matches a final consumer by customer id when it is known, else by the generi
 ]);
 
 it('keeps the status and retries later when the reconciliation read fails', function (int $attempt) {
-    fakeMoloniIssuing(['*/invoiceReceipts/getAll/*' => Http::response('Unavailable', 503)]);
+    fakeMoloniIssuing(['*/documents/getAll/*' => Http::response('Unavailable', 503)]);
     $document = rcUncertain();
 
     $e = catchMoloniException(fn () => runIssueJob($document, $attempt));
@@ -153,7 +153,7 @@ it('keeps the status and retries later when the reconciliation read fails', func
 it('never adopts the Moloni document of the superseded row', function () {
     fakeMoloniIssuing([
         // The first issue is Pending, so only the reissued row's reconciliation reads this list.
-        '*/invoiceReceipts/getAll/*' => [moloniDocumentRow()],
+        '*/documents/getAll/*' => [moloniDocumentRow()],
         '*/invoiceReceipts/insert/*' => Http::sequence()
             ->push(['valid' => 1, 'document_id' => 7001])
             ->push(['valid' => 1, 'document_id' => 7002]),
@@ -170,5 +170,5 @@ it('never adopts the Moloni document of the superseded row', function () {
 
     expect($new->fresh()?->document_id)->toBe(7002)
         ->and($new->fresh()?->status)->toBe(DocumentStatus::Issued)
-        ->and(moloniRequests('invoiceReceipts/getAll'))->toHaveCount(1);
+        ->and(moloniRequests('documents/getAll'))->toHaveCount(1);
 });

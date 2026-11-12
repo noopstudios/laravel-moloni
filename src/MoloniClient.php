@@ -53,14 +53,16 @@ class MoloniClient
     }
 
     /**
-     * Closed documents of the type whose our_reference is exactly the reference. Moloni's filter
-     * is exact but not unique, so every page is read and the match is checked again here.
+     * Closed documents whose our_reference is exactly the reference, from documents/getAll (the
+     * listing whose row fields are confirmed). Moloni's filter is exact but not unique, so every
+     * page is read and the match is checked again here. The type is not filtered on: callers
+     * match the series, customer and total.
      *
      * @return list<array<string, mixed>>
      */
     public function findByReference(DocumentType $type, string $reference): array
     {
-        $rows = $this->connector->readAll($this->endpoint($type).'/getAll', ['our_reference' => $reference]);
+        $rows = $this->connector->readAll('documents/getAll', ['our_reference' => $reference]);
 
         /** @var list<array<string, mixed>> */
         return array_values(array_filter($rows, fn (mixed $row) => is_array($row)

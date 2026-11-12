@@ -51,6 +51,8 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
     public const READBACK_FAILED = 'readback_failed';
 
+    public const COMPANY_CHANGED = 'company_changed';
+
     private const LOCK_SECONDS = 150;
 
     private const LOCKED_RETRY_SECONDS = 10;
@@ -140,6 +142,20 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         MoloniSettings $settings,
     ): void {
         if (in_array($document->status, [DocumentStatus::Issued, DocumentStatus::Failed, DocumentStatus::Superseded, DocumentStatus::Voided], true)) {
+            return;
+        }
+
+        if ($settings->companyIdOrNull() !== $document->company_id) {
+            // Every read (reconciliation, read-back, resolvers) goes to the configured company, so a
+            // document requested for another one could be looked for in the wrong place and sent twice.
+            $uncertain = $document->status !== DocumentStatus::Pending;
+            $this->settle(
+                $document,
+                $uncertain ? DocumentStatus::Unknown : DocumentStatus::Failed,
+                self::COMPANY_CHANGED,
+                "The document was requested for Moloni company {$document->company_id}, which is no longer the configured company.",
+            );
+
             return;
         }
 
