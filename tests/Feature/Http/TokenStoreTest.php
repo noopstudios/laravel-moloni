@@ -157,14 +157,54 @@ it('throws Authentication when the refresh and the fallback login are both refus
     Http::assertSentCount(3);
 });
 
-it('classifies a grant connection failure or 5xx as Transient', function (Closure|array $response) {
+it('classifies a grant failure that is not a credential refusal as Transient', function (Closure|array $response) {
     Http::fake(['*/grant/*' => is_array($response) ? Http::response(...$response) : $response]);
 
-    expect(catchMoloniException(fn () => app(TokenStore::class)->accessToken())->type)->toBe(FailureType::Transient);
+    $e = catchMoloniException(fn () => app(TokenStore::class)->accessToken());
+
+    expect($e->type)->toBe(FailureType::Transient)
+        ->and($e->getPrevious())->toBeNull();
 })->with([
     'connection failure' => fn () => Http::failedConnection(),
+    'other exception' => fn () => fn () => throw new RuntimeException('boom'),
     'server error' => [['', 503]],
+    'too many requests' => [[['error' => 'Too Many Requests'], 429]],
+    'html body' => [['<html>oops</html>', 200]],
+    'client error without an oauth error' => [[['message' => 'Bad Request'], 400]],
 ]);
+
+it('caps the grant timeouts so a refresh and a login fit inside the lock', function () {
+    config(['moloni.timeout' => 60, 'moloni.connect_timeout' => 30]);
+    $options = [];
+    Http::fake(['*/grant/*' => function (Request $request, array $sent) use (&$options) {
+        $options = $sent;
+
+        return Http::response(moloniGrant());
+    }]);
+
+    app(TokenStore::class)->accessToken();
+
+    expect($options['timeout'] ?? null)->toBe(10)
+        ->and($options['connect_timeout'] ?? null)->toBe(5);
+});
+
+it('caches a short-lived access token for at least one second', function () {
+    Http::fake(['*/grant/*' => Http::response([...moloniGrant(), 'expires_in' => 30])]);
+    $store = app(TokenStore::class);
+
+    expect($store->accessToken())->toBe('access-1')
+        ->and($store->accessToken())->toBe('access-1');
+    Http::assertSentCount(1);
+});
+
+it('throws Transient when the token lock cannot be acquired in time', function () {
+    Http::fake(['*/grant/*' => moloniGrant()]);
+    expect(Cache::lock('moloni-token', 30, 'another-worker')->get())->toBeTrue();
+    Sleep::fake(syncWithCarbon: true);
+
+    expect(catchMoloniException(fn () => app(TokenStore::class)->accessToken())->type)->toBe(FailureType::Transient);
+    Http::assertNothingSent();
+});
 
 it('forgets the access token only while it is still the cached one', function () {
     Http::fake(['*/grant/*' => Http::sequence()

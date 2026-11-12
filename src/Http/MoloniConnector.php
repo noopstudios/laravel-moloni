@@ -3,11 +3,12 @@
 namespace Noop\Moloni\Http;
 
 use Closure;
-use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
+use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Support\Facades\Http;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
+use Throwable;
 
 class MoloniConnector
 {
@@ -93,8 +94,11 @@ class MoloniConnector
                 ->connectTimeout((int) config('moloni.connect_timeout'))
                 ->withQueryParameters(['access_token' => $token, 'json' => 'true', 'human_errors' => 'true'])
                 ->post($this->url($endpoint), $params);
-        } catch (ConnectionException) {
-            // The previous exception is dropped on purpose: its message contains the URL with the token.
+        } catch (StrayRequestException $e) {
+            throw $e;
+        } catch (Throwable) {
+            // Whatever failed, the request may have reached Moloni. The original exception is
+            // dropped on purpose: its message can contain the URL with the token.
             throw new MoloniException("Could not complete the Moloni request to {$endpoint}.", $uncertain);
         }
 
@@ -120,7 +124,7 @@ class MoloniConnector
             throw new MoloniException("Moloni does not know the endpoint {$endpoint}.", FailureType::Validation);
         }
 
-        $errors = $this->validationErrors($response);
+        $errors = $isWrite || ! $response->successful() ? $this->validationErrors($response) : null;
         if ($errors !== null) {
             throw new MoloniException("Moloni rejected the data sent to {$endpoint}.", FailureType::Validation, $this->redact($errors, $token));
         }
@@ -128,7 +132,14 @@ class MoloniConnector
         $body = $response->json();
 
         if (! $response->successful() || ! is_array($body)) {
-            throw new MoloniException("Moloni returned an unexpected response for {$endpoint}.", FailureType::Unknown);
+            // A read never changes anything, so it is never Unknown: a refused read is Validation, the rest can be retried.
+            $type = match (true) {
+                $isWrite => FailureType::Unknown,
+                $response->clientError() && $response->status() !== 429 => FailureType::Validation,
+                default => FailureType::Transient,
+            };
+
+            throw new MoloniException("Moloni returned an unexpected response for {$endpoint}.", $type);
         }
 
         if ($isWrite && (array_is_list($body) || ! is_numeric($body['valid'] ?? null) || (int) $body['valid'] !== 1)) {
@@ -140,6 +151,7 @@ class MoloniConnector
 
     /**
      * Field errors (a list of {code, description}) or a `valid: 0` write response.
+     * Only checked on writes and non-2xx responses, so read rows are never mistaken for errors.
      * Both shapes are still to be confirmed against the sandbox; keep the parsing here.
      *
      * @return array<array-key, mixed>|null

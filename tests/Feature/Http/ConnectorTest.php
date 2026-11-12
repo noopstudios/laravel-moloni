@@ -110,6 +110,20 @@ it('succeeds on the retry when the new token is accepted', function () {
     expect(connectorWithCompany(5)->read('customers/getAll'))->toBe([['customer_id' => 1]]);
 });
 
+it('sends a write exactly twice and returns the result when the retry is accepted', function () {
+    Http::fake([
+        '*/grant/*' => Http::sequence()
+            ->push(moloniGrant('access-1', 'refresh-1'))
+            ->push(moloniGrant('access-2', 'refresh-2')),
+        '*/invoices/insert/*' => Http::sequence()
+            ->push(['error' => 'invalid_request', 'error_description' => 'The access token provided has expired'], 401)
+            ->push(['valid' => 1, 'document_id' => 77]),
+    ]);
+
+    expect(connectorWithCompany(5)->write('invoices/insert', ['customer_id' => 1]))->toBe(['valid' => 1, 'document_id' => 77]);
+    expect(Http::recorded(fn (Request $request) => isEndpointRequest($request, 'invoices/insert')))->toHaveCount(2);
+});
+
 it('throws Authentication without retrying when the company or method is forbidden', function () {
     Http::fake([
         '*/grant/*' => moloniGrant(),
@@ -198,7 +212,50 @@ it('classifies an unexpected write response as Unknown', function (mixed $body, 
     'no valid flag' => [['document_id' => 1], 200],
     'empty list' => [[], 200],
     'other client error' => [['error' => 'Bad Request'], 400],
+    'too many requests' => [['error' => 'Too Many Requests'], 429],
 ]);
+
+it('never classifies a failed read as Unknown', function (mixed $body, int $status, FailureType $type) {
+    Http::fake([
+        '*/grant/*' => moloniGrant(),
+        '*/customers/getAll/*' => Http::response($body, $status),
+    ]);
+
+    expect(catchMoloniException(fn () => connectorWithCompany(5)->read('customers/getAll'))->type)->toBe($type);
+})->with([
+    'html body' => ['<html>oops</html>', 200, FailureType::Transient],
+    'too many requests' => [['error' => 'Too Many Requests'], 429, FailureType::Transient],
+    'bad request' => [['error' => 'Bad Request', 'error_description' => 'Bad Request'], 400, FailureType::Validation],
+]);
+
+it('maps any exception thrown while sending to Unknown on write and Transient on read, without chaining it', function () {
+    $boom = fn () => throw new RuntimeException('Unexpected failure for https://api.moloni.pt/v1/x/?access_token=access-1');
+    Http::fake([
+        '*/grant/*' => moloniGrant('access-1'),
+        '*/customers/getAll/*' => $boom,
+        '*/invoices/insert/*' => $boom,
+    ]);
+    $connector = connectorWithCompany(5);
+
+    $read = catchMoloniException(fn () => $connector->read('customers/getAll'));
+    $write = catchMoloniException(fn () => $connector->write('invoices/insert', ['customer_id' => 1]));
+
+    expect($read->type)->toBe(FailureType::Transient)
+        ->and($write->type)->toBe(FailureType::Unknown)
+        ->and($read->getPrevious())->toBeNull()
+        ->and($write->getPrevious())->toBeNull()
+        ->and($write->getMessage())->not->toContain('access-1');
+});
+
+it('returns read rows shaped like field errors as data', function () {
+    $rows = [['code' => 'A1', 'description' => 'First'], ['code' => 'B2', 'description' => 'Second']];
+    Http::fake([
+        '*/grant/*' => moloniGrant(),
+        '*/taxExemptions/getAll/*' => Http::response($rows),
+    ]);
+
+    expect(connectorWithCompany(5)->read('taxExemptions/getAll'))->toBe($rows);
+});
 
 it('paginates readAll in pages of 50 until a short page', function () {
     $rows = fn (int $from, int $count) => array_map(fn ($i) => ['product_id' => $i], range($from, $from + $count - 1));
