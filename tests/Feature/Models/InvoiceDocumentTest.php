@@ -3,6 +3,7 @@
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Event;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
@@ -341,4 +342,47 @@ it('knows live statuses and debt-settling types', function () {
         ->toBe(['pending', 'issuing', 'issued', 'unknown'])
         ->and(array_values(array_map(fn (DocumentType $t) => $t->value, array_filter(DocumentType::cases(), fn (DocumentType $t) => $t->settlesDebt()))))
         ->toBe(['receipt', 'credit_note']);
+});
+
+it('still guards the live slot when model events are faked or skipped', function (Closure $save) {
+    $order = Order::create();
+    idmFor($order, DocumentType::Invoice);
+    $second = InvoiceDocument::factory()->for($order, 'invoiceable')->make(['type' => DocumentType::InvoiceReceipt]);
+
+    expect(fn () => $save($second))->toThrow(QueryException::class);
+})->with([
+    'Event::fake()' => [function (InvoiceDocument $document) {
+        Event::fake();
+        $document->save();
+    }],
+    'saveQuietly()' => [fn (InvoiceDocument $document) => $document->saveQuietly()],
+    'withoutEvents()' => [fn (InvoiceDocument $document) => InvoiceDocument::withoutEvents(fn () => $document->save())],
+]);
+
+it('frees the live slot under saveQuietly() too', function () {
+    $order = Order::create();
+    $live = idmFor($order, DocumentType::Invoice);
+    $live->status = DocumentStatus::Superseded;
+    $live->saveQuietly();
+
+    expect($live->fresh()?->active_key)->toBeNull();
+});
+
+it('holds no live slot while the status is not set', function () {
+    $document = new InvoiceDocument(['type' => DocumentType::Invoice, 'invoiceable_type' => 'order', 'invoiceable_id' => 1]);
+
+    expect(fn () => $document->save())->toThrow(QueryException::class)
+        ->and($document->active_key)->toBeNull();
+});
+
+it('rejects a negative link amount when model events are faked or skipped', function () {
+    $invoice = InvoiceDocument::factory()->invoice()->issued()->create();
+    $receipt = InvoiceDocument::factory()->receipt()->issued()->create();
+    $link = new InvoiceDocumentLink(['document_id' => $receipt->id, 'associated_document_id' => $invoice->id, 'amount_cents' => -1]);
+
+    expect(fn () => $link->saveQuietly())->toThrow(InvalidArgumentException::class);
+
+    Event::fake();
+    expect(fn () => $link->save())->toThrow(InvalidArgumentException::class)
+        ->and(InvoiceDocumentLink::count())->toBe(0);
 });

@@ -110,11 +110,17 @@ class InvoiceDocument extends Model
         ];
     }
 
-    protected static function booted(): void
+    /**
+     * Derives `active_key` in save() itself rather than in a model event, so it also holds under
+     * Event::fake(), saveQuietly() and withoutEvents().
+     *
+     * @param  array<string, mixed>  $options
+     */
+    public function save(array $options = []): bool
     {
-        static::saving(function (self $document) {
-            $document->active_key = $document->derivedActiveKey();
-        });
+        $this->active_key = $this->derivedActiveKey();
+
+        return parent::save($options);
     }
 
     protected static function newFactory(): InvoiceDocumentFactory
@@ -146,6 +152,8 @@ class InvoiceDocument extends Model
     private function derivedActiveKey(): ?string
     {
         $holdsSlot = in_array($this->type, [DocumentType::Invoice, DocumentType::InvoiceReceipt], true)
+            // Read raw: a model not yet given a status has none, whatever the property type says.
+            && $this->getAttribute('status') instanceof DocumentStatus
             && $this->status->isLive()
             && $this->invoiceable_type !== null
             && $this->invoiceable_id !== null;

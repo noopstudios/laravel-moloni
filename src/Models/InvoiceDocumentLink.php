@@ -26,13 +26,19 @@ class InvoiceDocumentLink extends Model
         'amount_cents',
     ];
 
-    protected static function booted(): void
+    /**
+     * Validated in save() itself rather than in a model event, so it also holds under
+     * Event::fake(), saveQuietly() and withoutEvents().
+     *
+     * @param  array<string, mixed>  $options
+     */
+    public function save(array $options = []): bool
     {
-        static::saving(function (self $link) {
-            if ($link->amount_cents < 0) {
-                throw new InvalidArgumentException('A document link amount cannot be negative.');
-            }
-        });
+        if ($this->amount_cents < 0) {
+            throw new InvalidArgumentException('A document link amount cannot be negative.');
+        }
+
+        return parent::save($options);
     }
 
     protected function casts(): array
