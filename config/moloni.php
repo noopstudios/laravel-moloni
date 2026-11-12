@@ -26,7 +26,8 @@ return [
     | Prefix
     |--------------------------------------------------------------------------
     |
-    | Optional prefix used to tell this application's records apart in Moloni.
+    | Prefix used to tell this application's records apart in Moloni. Required
+    | to create customers: their number is {prefix}{yy}-{key}.
     |
     */
 
