@@ -25,7 +25,8 @@
     },
     "autoload": {
         "psr-4": {
-            "Noop\\Moloni\\": "src/"
+            "Noop\\Moloni\\": "src/",
+            "Noop\\Moloni\\Database\\Factories\\": "database/factories/"
         }
     },
     "autoload-dev": {

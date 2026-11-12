@@ -17,5 +17,17 @@
     "No document set is configured for :type.": "Não está configurada nenhuma série de documentos para :type.",
     "No payment method is configured.": "Não está configurado nenhum método de pagamento.",
     "No maturity date is configured for 0 days.": "Não está configurado nenhum prazo de vencimento de 0 dias.",
-    "The fiscal zone :zone has no taxes in Moloni.": "A zona fiscal :zone não tem taxas de IVA no Moloni."
+    "The fiscal zone :zone has no taxes in Moloni.": "A zona fiscal :zone não tem taxas de IVA no Moloni.",
+    "Pro forma invoice": "Fatura pró-forma",
+    "Invoice": "Fatura",
+    "Invoice receipt": "Fatura-recibo",
+    "Receipt": "Recibo",
+    "Credit note": "Nota de crédito",
+    "Pending": "Pendente",
+    "Issuing": "A emitir",
+    "Issued": "Emitido",
+    "Failed": "Falhado",
+    "Unknown": "Por confirmar",
+    "Superseded": "Substituído",
+    "Voided": "Anulado"
 }

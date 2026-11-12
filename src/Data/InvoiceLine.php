@@ -71,6 +71,40 @@ final readonly class InvoiceLine
         return $this->toCents($base->multipliedBy(self::decimal($this->taxRate))->dividedByExact(100));
     }
 
+    /**
+     * @return array{name: string, quantity: float, unitNetPrice: string, taxRate: float, exemptionReason: ?string, reference: ?string, productId: ?int, summary: string}
+     */
+    public function toArray(): array
+    {
+        return [
+            'name' => $this->name,
+            'quantity' => $this->quantity,
+            'unitNetPrice' => $this->unitNetPrice,
+            'taxRate' => $this->taxRate,
+            'exemptionReason' => $this->exemptionReason,
+            'reference' => $this->reference,
+            'productId' => $this->productId,
+            'summary' => $this->summary,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data  As returned by toArray().
+     */
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            name: (string) $data['name'],
+            quantity: (float) $data['quantity'],
+            unitNetPrice: (string) $data['unitNetPrice'],
+            taxRate: (float) $data['taxRate'],
+            exemptionReason: isset($data['exemptionReason']) ? (string) $data['exemptionReason'] : null,
+            reference: isset($data['reference']) ? (string) $data['reference'] : null,
+            productId: isset($data['productId']) ? (int) $data['productId'] : null,
+            summary: (string) ($data['summary'] ?? ''),
+        );
+    }
+
     public function isZeroRated(): bool
     {
         return self::isZeroRate($this->taxRate);
