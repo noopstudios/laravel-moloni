@@ -4,7 +4,6 @@ namespace Noop\Moloni\Tax;
 
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
-use Noop\Moloni\Data\CustomerData;
 use Noop\Moloni\Support\Payload;
 
 /**
@@ -12,6 +11,9 @@ use Noop\Moloni\Support\Payload;
  */
 final readonly class ViesResult
 {
+    /** ISO-8601 with microseconds and offset, so a date survives the round trip unchanged. */
+    public const DATE_FORMAT = 'Y-m-d\\TH:i:s.uP';
+
     /**
      * @param  bool  $available  False when VIES could not give an answer; then $valid is null.
      * @param  bool|null  $valid  Whether VIES knows the number as valid; null when unavailable.
@@ -33,7 +35,7 @@ final readonly class ViesResult
             'available' => $this->available,
             'valid' => $this->valid,
             'requestIdentifier' => $this->requestIdentifier,
-            'checkedAt' => $this->checkedAt->format(CustomerData::DATE_FORMAT),
+            'checkedAt' => $this->checkedAt->format(self::DATE_FORMAT),
         ];
     }
 

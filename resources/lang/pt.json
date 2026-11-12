@@ -66,5 +66,8 @@
     "The receipt :reference no longer fits what its invoices still owe: :reason": "O recibo :reference já não cabe no que as faturas ainda devem: :reason",
     "Moloni already has receipts on the invoices of :reference that cannot be confirmed as this one; check them in Moloni.": "O Moloni já tem recibos nas faturas de :reference que não é possível confirmar como sendo este; verifique-os no Moloni.",
     "The VAT number could not be validated right now. Please try again later.": "Não foi possível validar o número de IVA neste momento. Tente novamente mais tarde.",
-    "No exemption reason is configured for :scenario.": "Não está configurado nenhum motivo de isenção para :scenario."
+    "No exemption reason is configured for :scenario.": "Não está configurado nenhum motivo de isenção para :scenario.",
+    "EU business": "empresa da UE",
+    "non-EU business": "empresa fora da UE",
+    "non-EU consumer": "consumidor fora da UE"
 }

@@ -9,7 +9,7 @@ use Noop\Moloni\Settings\MoloniSettings;
 
 /**
  * Portugal pays VAT; an EU business with a VAT number VIES confirms is exempt (M40 by default);
- * an EU consumer pays VAT; outside the EU there is no VAT. Northern Ireland (XI) counts as outside.
+ * an EU consumer pays VAT; outside the EU there is no VAT, and isBusiness alone picks the code. Northern Ireland (XI) counts as outside.
  */
 class DefaultTaxRule implements TaxRule
 {
@@ -27,16 +27,17 @@ class DefaultTaxRule implements TaxRule
     public function decide(CustomerData $customer, float $standardRate): TaxDecision
     {
         $country = strtoupper(trim((string) $customer->country)) ?: 'PT';
+        $country = $country === 'EL' ? 'GR' : $country;
 
         if ($country === 'PT') {
             return new TaxDecision($standardRate, null);
         }
 
-        $hasVat = trim((string) $customer->vat) !== '';
-
         if (! in_array($country, self::EU_COUNTRIES, true)) {
-            return $this->exempt($customer->isBusiness && $hasVat ? 'non_eu_business' : 'non_eu_consumer');
+            return $this->exempt($customer->isBusiness ? 'non_eu_business' : 'non_eu_consumer');
         }
+
+        $hasVat = trim((string) $customer->vat) !== '';
 
         if (! $customer->isBusiness || ! $hasVat || ! config('moloni.vies.enabled')) {
             return new TaxDecision($standardRate, null);
@@ -64,7 +65,13 @@ class DefaultTaxRule implements TaxRule
         $code = $this->settings->exemption_reasons[$scenario] ?? '';
 
         if (trim($code) === '') {
-            throw new MoloniException(__('No exemption reason is configured for :scenario.', ['scenario' => $scenario]), FailureType::Validation);
+            $label = match ($scenario) {
+                'eu_business' => __('EU business'),
+                'non_eu_business' => __('non-EU business'),
+                default => __('non-EU consumer'),
+            };
+
+            throw new MoloniException(__('No exemption reason is configured for :scenario.', ['scenario' => $label]), FailureType::Validation);
         }
 
         return new TaxDecision(0.0, $code, $vies);

@@ -77,7 +77,8 @@ it('blocks when VIES is unavailable and the setting is block', function () {
 
     $e = catchMoloniException(fn () => app(TaxRule::class)->decide(taxCustomer('DE'), 23.0));
 
-    expect($e->type)->toBe(FailureType::Validation);
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toBe('The VAT number could not be validated right now. Please try again later.');
 });
 
 it('charges the standard rate to an EU consumer without calling VIES', function () {
@@ -127,6 +128,29 @@ it('exempts a consumer outside the EU with its own code', function () {
     Http::assertNothingSent();
 });
 
+it('decides a non-EU customer by isBusiness alone, whatever the VAT number', function (?string $vat) {
+    useMoloniSettings(['exemption_reasons' => ['eu_business' => 'M40', 'non_eu_business' => 'M41', 'non_eu_consumer' => 'M44']]);
+    Http::fake();
+
+    expect(app(TaxRule::class)->decide(taxCustomer('US', true, $vat), 23.0)->exemptionReason)->toBe('M41')
+        ->and(app(TaxRule::class)->decide(taxCustomer('US', false, $vat), 23.0)->exemptionReason)->toBe('M44');
+    Http::assertNothingSent();
+})->with(['null' => [null], 'blank' => [' '], 'number' => ['123456789']]);
+
+it('treats the VIES spelling EL as Greece', function () {
+    fakeVies(true);
+
+    $decision = app(TaxRule::class)->decide(taxCustomer('el'), 23.0);
+
+    expect($decision->exemptionReason)->toBe('M40');
+    Http::assertSent(fn (Request $request) => $request['countryCode'] === 'EL');
+});
+
+it('lists the 27 EU member states with GR and without EL, GB or XI', function () {
+    expect(DefaultTaxRule::EU_COUNTRIES)->toHaveCount(27)->toContain('GR')
+        ->and(array_intersect(['EL', 'GB', 'XI'], DefaultTaxRule::EU_COUNTRIES))->toBe([]);
+});
+
 it('treats Northern Ireland as outside the EU', function () {
     Http::fake();
 
@@ -141,18 +165,20 @@ it('sends EL for Greece', function () {
     Http::assertSent(fn (Request $request) => $request['countryCode'] === 'EL');
 });
 
-it('fails with Validation when the exemption reason for the scenario is not configured', function (string $country, bool $isBusiness, string $missing) {
+it('fails with Validation when the exemption reason for the scenario is not configured', function (string $country, bool $isBusiness, string $missing, ?string $vat = '123456789') {
     $reasons = ['eu_business' => 'M40', 'non_eu_business' => 'M40', 'non_eu_consumer' => 'M44'];
     $reasons[$missing] = '';
     useMoloniSettings(['exemption_reasons' => $reasons]);
     fakeVies(true);
 
-    $e = catchMoloniException(fn () => app(TaxRule::class)->decide(taxCustomer($country, $isBusiness), 23.0));
+    $e = catchMoloniException(fn () => app(TaxRule::class)->decide(taxCustomer($country, $isBusiness, $vat), 23.0));
 
-    expect($e->type)->toBe(FailureType::Validation);
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->not->toContain($missing);
 })->with([
     'eu business' => ['DE', true, 'eu_business'],
     'non-eu business' => ['US', true, 'non_eu_business'],
+    'non-eu business without VAT number' => ['US', true, 'non_eu_business', null],
     'non-eu consumer' => ['US', false, 'non_eu_consumer'],
 ]);
 
