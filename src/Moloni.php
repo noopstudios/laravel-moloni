@@ -69,18 +69,20 @@ class Moloni
 
         $attributes = $this->attributes($document->type, $invoiceable, $payment, $dueInDays);
 
-        try {
-            $new = $document->getConnection()->transaction(function () use ($document, $invoiceable, $attributes) {
-                $old = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
-                $this->assertReissuable($old);
-                $old->status = DocumentStatus::Superseded;
-                $old->save();
+        $new = $this->whileHolding($document, function () use ($document, $invoiceable, $attributes) {
+            try {
+                return $document->getConnection()->transaction(function () use ($document, $invoiceable, $attributes) {
+                    $old = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
+                    $this->assertReissuable($old);
+                    $old->status = DocumentStatus::Superseded;
+                    $old->save();
 
-                return $this->create($document->type, $invoiceable, $attributes);
-            });
-        } catch (UniqueConstraintViolationException) {
-            throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $document->reference]), FailureType::Validation);
-        }
+                    return $this->create($document->type, $invoiceable, $attributes);
+                });
+            } catch (UniqueConstraintViolationException) {
+                throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $document->reference]), FailureType::Validation);
+            }
+        });
 
         $document->refresh();
         $this->dispatch($new);
@@ -89,25 +91,54 @@ class Moloni
     }
 
     /**
-     * Sends a failed document again, on the same row.
+     * Sends a failed document again, on the same row, with its attempts counted from zero.
      */
     public function retry(InvoiceDocument $document): void
     {
-        if ($document->status !== DocumentStatus::Failed) {
-            throw new MoloniException(__('Only a failed document can be retried.'), FailureType::Validation);
-        }
+        $this->whileHolding($document, function () use ($document) {
+            try {
+                $document->getConnection()->transaction(function () use ($document) {
+                    // The caller's copy may be stale: the status is checked on the locked row.
+                    $current = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
 
-        $document->fill(['status' => DocumentStatus::Pending, 'error_type' => null, 'error_message' => null]);
+                    if ($current->status !== DocumentStatus::Failed) {
+                        throw new MoloniException(__('Only a failed document can be retried.'), FailureType::Validation);
+                    }
 
-        try {
-            $document->save();
-        } catch (UniqueConstraintViolationException) {
-            $document->refresh();
-
-            throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $document->reference]), FailureType::Validation);
-        }
+                    $current->fill(['status' => DocumentStatus::Pending, 'error_type' => null, 'error_message' => null, 'attempts' => 0])->save();
+                });
+            } catch (UniqueConstraintViolationException) {
+                throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $document->reference]), FailureType::Validation);
+            } finally {
+                $document->refresh();
+            }
+        });
 
         $this->dispatch($document);
+    }
+
+    /**
+     * Runs $callback holding the document's lock, the one the issuing job holds while it works,
+     * and releases it before anything is dispatched.
+     *
+     * @template T
+     *
+     * @param  callable(): T  $callback
+     * @return T
+     */
+    private function whileHolding(InvoiceDocument $document, callable $callback): mixed
+    {
+        $lock = IssueDocument::lockFor($document);
+
+        if (! $lock->get()) {
+            throw new MoloniException(__('The document :reference is being processed; try again in a moment.', ['reference' => $document->reference]), FailureType::Validation);
+        }
+
+        try {
+            return $callback();
+        } finally {
+            $lock->release();
+        }
     }
 
     /**

@@ -7,18 +7,25 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Noop\Moloni\Catalog\MoloniCatalog;
 use Noop\Moloni\Data\CustomerData;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\InvoiceLine;
 use Noop\Moloni\Data\PaymentData;
+use Noop\Moloni\Data\ResolvedCustomer;
 use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Events\DocumentFailed;
 use Noop\Moloni\Events\DocumentIssued;
+use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Facades\Moloni;
+use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Jobs\IssueDocument;
 use Noop\Moloni\Models\InvoiceDocument;
+use Noop\Moloni\MoloniClient;
+use Noop\Moloni\Resolvers\CustomerResolver;
+use Noop\Moloni\Settings\MoloniSettings;
 use Noop\Moloni\Tests\Fixtures\Order;
 
 use function Pest\Laravel\travelTo;
@@ -240,19 +247,37 @@ it('retries transient failures with backoff and fails after the last attempt', f
         ->and($job->timeout)->toBe(120)
         ->and($job->uniqueId())->toBe((string) $document->id);
 
-    $e = catchMoloniException(fn () => runIssueJob($document, attempt: 2));
-    expect($e->type)->toBe(FailureType::Transient)
-        ->and($document->fresh()?->status)->toBe(DocumentStatus::Pending);
+    // The row counts the runs: the queue's own attempt number (here already 3) does not decide.
+    foreach ([1, 2] as $run) {
+        $e = catchMoloniException(fn () => runIssueJob($document, attempt: 3));
+        expect($e->type)->toBe(FailureType::Transient)
+            ->and($document->fresh()?->status)->toBe(DocumentStatus::Pending)
+            ->and($document->fresh()?->attempts)->toBe($run);
+    }
     Event::assertNotDispatched(DocumentFailed::class);
 
-    runIssueJob($document, attempt: 3);
+    runIssueJob($document);
 
     $document->refresh();
     expect($document->status)->toBe(DocumentStatus::Failed)
         ->and($document->error_type)->toBe(FailureType::Transient->value)
-        ->and($document->attempts)->toBe(0)
+        ->and($document->attempts)->toBe(3)
         ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
     Event::assertDispatched(DocumentFailed::class);
+});
+
+it('keeps a sync-dispatched document pending when its first attempt fails transiently', function () {
+    fakeMoloniIssuing(['*/taxes/getAll/*' => Http::response('Unavailable', 503)]);
+    $order = Order::create(['customer_vat' => '509999999']);
+
+    $e = catchMoloniException(fn () => Moloni::invoiceReceipt($order, irPayment()));
+
+    $document = InvoiceDocument::sole();
+    expect($e->type)->toBe(FailureType::Transient)
+        ->and($document->status)->toBe(DocumentStatus::Pending)
+        ->and($document->attempts)->toBe(1)
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+    Event::assertNotDispatched(DocumentFailed::class);
 });
 
 it('retries an uncertain customer write instead of marking the document unknown', function () {
@@ -323,7 +348,59 @@ it('marks the document unknown when Moloni confirms it without an id', function 
 
     $document = Moloni::invoiceReceipt(Order::create(['customer_vat' => '509999999']), irPayment())->fresh();
 
-    expect($document?->status)->toBe(DocumentStatus::Unknown);
+    expect($document?->status)->toBe(DocumentStatus::Unknown)
+        ->and($document?->document_id)->toBeNull()
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(1);
+    Event::assertDispatched(DocumentFailed::class);
+    Event::assertNotDispatched(DocumentIssued::class);
+});
+
+/**
+ * Replaces the document client with one whose insert throws $error without sending anything.
+ */
+function irInsertThrows(Throwable $error): void
+{
+    app()->instance(MoloniClient::class, new class(app(MoloniConnector::class), $error) extends MoloniClient
+    {
+        public function __construct(MoloniConnector $connector, private readonly Throwable $error)
+        {
+            parent::__construct($connector);
+        }
+
+        public function insert(DocumentType $type, array $payload): int
+        {
+            throw $this->error;
+        }
+    });
+}
+
+it('marks the document unknown when the insert fails in an unexpected way', function () {
+    fakeMoloniIssuing();
+    $document = irPending();
+    irInsertThrows(new RuntimeException('Socket closed with the URL in the message.'));
+
+    runIssueJob($document);
+
+    $document->refresh();
+    expect($document->status)->toBe(DocumentStatus::Unknown)
+        ->and($document->error_type)->toBe(FailureType::Unknown->value)
+        ->and($document->error_message)->toBe('The document may have been issued: RuntimeException.');
+    Event::assertDispatched(DocumentFailed::class);
+});
+
+it('puts the document back to pending when the token request fails before the insert', function () {
+    fakeMoloniIssuing();
+    $document = irPending();
+    irInsertThrows(new MoloniException('Could not log in to Moloni.', FailureType::Transient));
+
+    $e = catchMoloniException(fn () => runIssueJob($document));
+
+    $document->refresh();
+    expect($e->type)->toBe(FailureType::Transient)
+        ->and($document->status)->toBe(DocumentStatus::Pending)
+        ->and($document->attempts)->toBe(1)
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+    Event::assertNotDispatched(DocumentFailed::class);
 });
 
 it('does nothing for a document that is already settled', function (DocumentStatus $status) {
@@ -349,10 +426,10 @@ it('finishes a document whose id was saved before the job stopped, without inser
     expect($document->status)->toBe(DocumentStatus::Issued)
         ->and($document->document_number)->toBe('GR/8')
         ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0)
-        ->and(moloniRequests('documents/getAll'))->toHaveCount(0);
+        ->and(moloniRequests('invoiceReceipts/getAll'))->toHaveCount(0);
 });
 
-it('releases the job while another worker holds the document lock', function () {
+it('leaves the document to the run that holds its lock, without spending a try', function () {
     Http::fake();
     $document = irPending();
     $lock = Cache::lock("moloni-doc-{$document->id}", 150);
@@ -360,25 +437,116 @@ it('releases the job while another worker holds the document lock', function () 
 
     $job = runIssueJob($document);
 
-    $job->assertReleased();
+    $job->assertNotReleased();
+    $job->assertNotFailed();
     Http::assertNothingSent();
-    expect($document->fresh()?->status)->toBe(DocumentStatus::Pending);
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Pending)
+        ->and($document->fresh()?->attempts)->toBe(0);
     $lock->release();
 });
 
-it('marks only a pending document failed when the job itself fails', function (DocumentStatus $status, DocumentStatus $expected) {
+it('settles a document only as far as is safe when the job itself fails', function (DocumentStatus $status, int $attempts, DocumentStatus $expected) {
     $document = irPending();
-    $document->status = $status;
-    $document->save();
+    $document->fill(['status' => $status, 'attempts' => $attempts])->save();
 
     (new IssueDocument($document))->failed(new RuntimeException('Worker timed out.'));
 
-    expect($document->fresh()?->status)->toBe($expected);
+    $document->refresh();
+    expect($document->status)->toBe($expected);
+
+    if ($expected !== $status) {
+        expect($document->error_type)->toBe('job_failed')
+            ->and($document->error_message)->toBe('The issuing job failed: RuntimeException.');
+        Event::assertDispatched(DocumentFailed::class);
+    } else {
+        Event::assertNotDispatched(DocumentFailed::class);
+    }
 })->with([
-    'pending' => [DocumentStatus::Pending, DocumentStatus::Failed],
-    'issuing' => [DocumentStatus::Issuing, DocumentStatus::Issuing],
-    'unknown' => [DocumentStatus::Unknown, DocumentStatus::Unknown],
+    'pending with tries left' => [DocumentStatus::Pending, 1, DocumentStatus::Pending],
+    'pending on its last try' => [DocumentStatus::Pending, 3, DocumentStatus::Failed],
+    'issuing' => [DocumentStatus::Issuing, 1, DocumentStatus::Unknown],
+    'unknown' => [DocumentStatus::Unknown, 1, DocumentStatus::Unknown],
 ]);
+
+it('leaves the document alone when the job fails while another run holds it', function () {
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Issuing, 'attempts' => 3])->save();
+    $lock = Cache::lock("moloni-doc-{$document->id}", 150);
+    $lock->get();
+
+    (new IssueDocument($document))->failed(new RuntimeException('Worker timed out.'));
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Issuing);
+    $lock->release();
+});
+
+it('never inserts when the row changed while the payload was being built', function () {
+    fakeMoloniIssuing();
+    $document = irPending();
+    app()->bind(CustomerResolver::class, fn () => new class(app(MoloniConnector::class), app(MoloniCatalog::class), app(MoloniSettings::class), $document) extends CustomerResolver
+    {
+        public function __construct(MoloniConnector $connector, MoloniCatalog $catalog, MoloniSettings $settings, private readonly InvoiceDocument $document)
+        {
+            parent::__construct($connector, $catalog, $settings);
+        }
+
+        public function resolve(CustomerData $customer): ResolvedCustomer
+        {
+            // Something outside this run moves the row on.
+            $row = InvoiceDocument::findOrFail($this->document->id);
+            $row->status = DocumentStatus::Superseded;
+            $row->save();
+
+            return parent::resolve($customer);
+        }
+    });
+
+    runIssueJob($document);
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Superseded)
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+});
+
+it('dates the due date on the day the document is issued', function () {
+    fakeMoloniIssuing(['*/invoices/insert/*' => ['valid' => 1, 'document_id' => 7001], '*/documents/getOne/*' => moloniDocumentRow(['document_set_id' => 41])]);
+    Queue::fake();
+    $document = Moloni::invoice(Order::create(['customer_vat' => '509999999']), 30);
+    travelTo(Carbon::parse('2026-05-06 10:00:00'));
+
+    runIssueJob($document);
+
+    expect($document->fresh()?->due_at?->toDateString())->toBe('2026-06-05')
+        ->and(moloniRequests('invoices/insert')[0]['date'])->toBe('2026-05-06')
+        ->and(moloniRequests('invoices/insert')[0]['expiration_date'])->toBe('2026-06-05');
+});
+
+it('completes a document whose read-back failed, without inserting or announcing it again', function () {
+    fakeMoloniIssuing();
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Issued, 'document_id' => 7001, 'issued_at' => now(), 'error_type' => 'readback_failed', 'error_message' => 'Lost.'])->save();
+
+    runIssueJob($document);
+
+    $document->refresh();
+    expect($document->status)->toBe(DocumentStatus::Issued)
+        ->and($document->document_number)->toBe('GR/8')
+        ->and($document->error_type)->toBeNull()
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0)
+        ->and(moloniRequests('invoiceReceipts/getAll'))->toHaveCount(0);
+    Event::assertNotDispatched(DocumentIssued::class);
+});
+
+it('never moves an issued document whose read-back failed out of issued when the company changed', function () {
+    Http::fake();
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Issued, 'document_id' => 7001, 'error_type' => 'readback_failed'])->save();
+    useMoloniSettings(['company_id' => 6]);
+
+    runIssueJob($document);
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Issued);
+    Http::assertNothingSent();
+});
 
 it('retries a failed document on the same row', function () {
     $document = irPending();
@@ -403,6 +571,47 @@ it('retries only failed documents that do not collide with a live one', function
     expect(catchMoloniException(fn () => Moloni::retry($pending))->type)->toBe(FailureType::Validation)
         ->and(catchMoloniException(fn () => Moloni::retry($failed))->type)->toBe(FailureType::Validation)
         ->and($failed->fresh()?->status)->toBe(DocumentStatus::Failed);
+});
+
+it('retries from the stored status, not from a stale copy', function () {
+    $document = irPending();
+    $stale = $document->replicate();
+    $stale->id = $document->id;
+    $stale->exists = true;
+    $stale->status = DocumentStatus::Failed;
+
+    expect(catchMoloniException(fn () => Moloni::retry($stale))->type)->toBe(FailureType::Validation)
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Pending);
+    Queue::assertPushed(IssueDocument::class, 1);
+});
+
+it('refuses to retry or reissue a document another run holds', function (DocumentStatus $status, Closure $action) {
+    $document = irPending();
+    $document->fill(['status' => $status, 'error_type' => 'validation'])->save();
+    $lock = Cache::lock("moloni-doc-{$document->id}", 150);
+    $lock->get();
+
+    $e = catchMoloniException(fn () => $action($document));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('being processed')
+        ->and($document->fresh()?->status)->toBe($status)
+        ->and(InvoiceDocument::count())->toBe(1);
+    Queue::assertPushed(IssueDocument::class, 1);
+    $lock->release();
+})->with([
+    'retry' => [DocumentStatus::Failed, fn (InvoiceDocument $document) => Moloni::retry($document)],
+    'reissue' => [DocumentStatus::Unknown, fn (InvoiceDocument $document) => Moloni::reissue($document)],
+]);
+
+it('resets the attempts when a failed document is retried', function () {
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Failed, 'attempts' => 3])->save();
+
+    Moloni::retry($document);
+
+    expect($document->attempts)->toBe(0)
+        ->and($document->status)->toBe(DocumentStatus::Pending);
 });
 
 it('reissue supersedes the old document and frees the live slot', function () {

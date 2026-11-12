@@ -8,14 +8,20 @@ use Noop\Moloni\Events\DocumentFailed;
 use Noop\Moloni\Events\DocumentIssued;
 use Noop\Moloni\Models\InvoiceDocument;
 use Noop\Moloni\MoloniClient;
+use Noop\Moloni\Support\Message;
 use Noop\Moloni\Support\Vat;
 
 /**
- * Looks in Moloni for a document whose insert may have been applied (status Issuing or Unknown)
- * before it is ever sent again.
+ * Looks in Moloni for the document before every insert, so a document whose earlier insert was
+ * applied (a lost response, a reissue of an unconfirmed document) is never sent again.
  *
- * A Moloni document matches when it is closed, has the row's our_reference, series, customer and
- * total, and is not already recorded on another row (e.g. the document a reissue superseded).
+ * Blocking candidates: closed documents of the same type with exactly the row's our_reference, in
+ * its series, not recorded on another local row (e.g. the document a reissue superseded). A row
+ * whose series or id cannot be read blocks as well.
+ *
+ * - None: nothing of this document exists, so it may be issued.
+ * - Exactly one, with the row's customer and total: adopted.
+ * - Anything else: the row is left Unknown for a person to decide.
  */
 class ReconcileDocument
 {
@@ -24,55 +30,73 @@ class ReconcileDocument
     public function __construct(private readonly MoloniClient $client) {}
 
     /**
-     * True when the row is settled: it adopted the one match, or it stays Unknown because several
-     * documents match. False when Moloni has no such document, so it may be issued. A failed read
-     * throws, leaving the row as it was.
+     * True when the row is settled (adopted, or left Unknown); false when Moloni has nothing that
+     * could be this document. A failed read throws, leaving the row as it was.
      */
     public function __invoke(InvoiceDocument $document): bool
     {
-        $matches = array_values(array_filter(
+        $blocking = array_values(array_filter(
             $this->client->findByReference($document->type, $document->reference),
-            fn (array $row) => $this->matches($document, $row),
+            fn (array $row) => $this->blocks($document, $row),
         ));
 
-        if ($matches === []) {
+        if ($blocking === []) {
             return false;
         }
 
-        if (count($matches) > 1) {
+        if (count($blocking) === 1 && $this->adoptable($document, $blocking[0])) {
             $document->fill([
-                'status' => DocumentStatus::Unknown,
-                'error_type' => self::AMBIGUOUS,
-                'error_message' => count($matches)." documents in Moloni match {$document->reference}; check which one is this document's.",
+                'status' => DocumentStatus::Issued,
+                'document_id' => (int) $blocking[0]['document_id'],
+                'document_number' => MoloniClient::documentNumber($blocking[0]),
+                'issued_at' => now(),
+                'error_type' => null,
+                'error_message' => null,
             ])->save();
-            Event::dispatch(new DocumentFailed($document));
+            Event::dispatch(new DocumentIssued($document));
 
             return true;
         }
 
         $document->fill([
-            'status' => DocumentStatus::Issued,
-            'document_id' => (int) $matches[0]['document_id'],
-            'document_number' => MoloniClient::documentNumber($matches[0]),
-            'issued_at' => now(),
-            'error_type' => null,
-            'error_message' => null,
+            'status' => DocumentStatus::Unknown,
+            'error_type' => self::AMBIGUOUS,
+            'error_message' => Message::get('Moloni already has :count document(s) with the reference :reference in this series that cannot be confirmed as this one; check them in Moloni.', [
+                'count' => count($blocking),
+                'reference' => $document->reference,
+            ]),
         ])->save();
-        Event::dispatch(new DocumentIssued($document));
+        Event::dispatch(new DocumentFailed($document));
 
         return true;
     }
 
     /**
-     * @param  array<string, mixed>  $row  A closed document with our reference (see MoloniClient::findByReference()).
+     * @param  array<string, mixed>  $row  A document of the type with our reference (see MoloniClient::findByReference()).
      */
-    private function matches(InvoiceDocument $document, array $row): bool
+    private function blocks(InvoiceDocument $document, array $row): bool
     {
-        return is_numeric($row['document_set_id'] ?? null)
-            && (int) $row['document_set_id'] === $document->document_set_id
+        $setId = $row['document_set_id'] ?? null;
+        $documentId = $row['document_id'] ?? null;
+
+        // What cannot be read cannot be ruled out.
+        if (! is_numeric($setId) || ! is_numeric($documentId)) {
+            return true;
+        }
+
+        return (int) $setId === $document->document_set_id
+            && ! $this->recordedElsewhere($document, (int) $documentId);
+    }
+
+    /**
+     * @param  array<string, mixed>  $row
+     */
+    private function adoptable(InvoiceDocument $document, array $row): bool
+    {
+        return is_numeric($row['document_id'] ?? null)
+            && is_numeric($row['document_set_id'] ?? null)
             && $this->sameCustomer($document, $row)
-            && MoloniClient::cents($row['net_value'] ?? null) === $document->expected_total_cents
-            && ! $this->recordedElsewhere($document, (int) $row['document_id']);
+            && MoloniClient::cents($row['net_value'] ?? null) === $document->expected_total_cents;
     }
 
     /**

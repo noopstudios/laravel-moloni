@@ -4,11 +4,13 @@ namespace Noop\Moloni\Jobs;
 
 use Carbon\CarbonImmutable;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
@@ -30,18 +32,29 @@ use Noop\Moloni\Resolvers\CustomerResolver;
 use Noop\Moloni\Resolvers\ProductResolver;
 use Noop\Moloni\Resolvers\TaxResolver;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Support\Message;
 use Noop\Moloni\Support\Payload;
 use Throwable;
 
 /**
  * Issues one document in Moloni from its frozen payload. A document must never be issued twice:
  *
- * - the row is saved as Issuing before the insert is sent, and its Moloni id right after;
- * - a row found Issuing or Unknown is first looked for in Moloni (ReconcileDocument);
+ * - every run that is about to insert first looks for the document in Moloni (ReconcileDocument);
+ * - the row moves to Issuing by compare-and-set and is committed before the insert is sent, and
+ *   its Moloni id is saved right after;
  * - an insert whose outcome is uncertain leaves the row Unknown and is never retried here.
  *
- * Failures before the insert (customer, products, taxes) are retried with backoff when Moloni
- * may answer differently later, and fail the row otherwise.
+ * Failures before the insert (customer, products, taxes) are retried with backoff when Moloni may
+ * answer differently later; the row's `attempts` (runs that tried to issue it) decides the last
+ * attempt, so lock contention and re-dispatches never shorten the retries.
+ *
+ * Host requirements:
+ * - the queue connection's `retry_after` must exceed the job timeout (120 s), or a running job is
+ *   handed to a second worker;
+ * - the cache store must support atomic locks and be shared by every worker (not `array`, not a
+ *   per-server `file` store): the per-document lock is what keeps two runs apart;
+ * - DocumentIssued and DocumentFailed are dispatched at most once per outcome; a crash right after
+ *   the state is saved loses the event, never the state.
  */
 class IssueDocument implements ShouldBeUnique, ShouldQueue
 {
@@ -53,9 +66,10 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
     public const COMPANY_CHANGED = 'company_changed';
 
-    private const LOCK_SECONDS = 150;
+    public const JOB_FAILED = 'job_failed';
 
-    private const LOCKED_RETRY_SECONDS = 10;
+    /** Longer than the timeout: a run never outlives its lock. */
+    public const LOCK_SECONDS = 150;
 
     private const MAX_ERROR_LENGTH = 1000;
 
@@ -83,6 +97,15 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         return (string) $this->document->getKey();
     }
 
+    /**
+     * The lock every writer of a document's status takes: this job, Moloni::retry() and
+     * Moloni::reissue().
+     */
+    public static function lockFor(InvoiceDocument $document): Lock
+    {
+        return Cache::lock('moloni-doc-'.$document->getKey(), self::LOCK_SECONDS);
+    }
+
     public function handle(
         MoloniClient $client,
         ReconcileDocument $reconcile,
@@ -91,11 +114,11 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         ProductResolver $products,
         MoloniSettings $settings,
     ): void {
-        $lock = Cache::lock('moloni-doc-'.$this->document->getKey(), self::LOCK_SECONDS);
+        $lock = self::lockFor($this->document);
 
+        // Another run holds the document: it is working on it, and moloni:recover is the safety
+        // net. Releasing would only spend one of this job's tries.
         if (! $lock->get()) {
-            $this->release(self::LOCKED_RETRY_SECONDS);
-
             return;
         }
 
@@ -111,25 +134,36 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
     }
 
     /**
-     * Called by the queue when the job gives up (an unexpected exception on the last attempt, a
-     * timeout). Only a Pending row is marked failed: an Issuing or Unknown one may exist in Moloni.
+     * Called by the queue when the job gives up (an exception on its last try, a timeout). It
+     * skips a document another run holds. A Pending row with retries left stays for
+     * moloni:recover; an Issuing one may exist in Moloni, so it becomes Unknown, never Failed.
      */
     public function failed(?Throwable $e): void
     {
-        $document = $this->document->fresh();
+        $lock = self::lockFor($this->document);
 
-        if ($document?->status !== DocumentStatus::Pending) {
+        if (! $lock->get()) {
             return;
         }
 
-        if ($e instanceof MoloniException) {
-            $this->markFailed($document, $e);
+        try {
+            $document = $this->document->fresh();
 
-            return;
+            if ($document === null) {
+                return;
+            }
+
+            $message = $e instanceof MoloniException ? $this->message($e) : $this->jobFailedMessage($e);
+            $errorType = $e instanceof MoloniException ? $e->type->value : self::JOB_FAILED;
+
+            if ($document->status === DocumentStatus::Issuing) {
+                $this->settle($document, DocumentStatus::Unknown, $errorType, $message);
+            } elseif ($document->status === DocumentStatus::Pending && $document->attempts >= $this->tries) {
+                $this->settle($document, DocumentStatus::Failed, $errorType, $message);
+            }
+        } finally {
+            $lock->release();
         }
-
-        // Other exceptions (database errors, …) may carry data in their message.
-        $this->settle($document, DocumentStatus::Failed, 'job_failed', 'The issuing job failed'.($e !== null ? ': '.class_basename($e) : '').'.');
     }
 
     private function issue(
@@ -141,19 +175,27 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         ProductResolver $products,
         MoloniSettings $settings,
     ): void {
-        if (in_array($document->status, [DocumentStatus::Issued, DocumentStatus::Failed, DocumentStatus::Superseded, DocumentStatus::Voided], true)) {
+        if ($this->needsReadBack($document)) {
+            // Issued, but its number and total were never read: only read, never insert.
+            if ($settings->companyIdOrNull() === $document->company_id) {
+                $this->finish($document, $client, announce: false);
+            }
+
+            return;
+        }
+
+        if (! in_array($document->status, [DocumentStatus::Pending, DocumentStatus::Issuing, DocumentStatus::Unknown], true)) {
             return;
         }
 
         if ($settings->companyIdOrNull() !== $document->company_id) {
             // Every read (reconciliation, read-back, resolvers) goes to the configured company, so a
             // document requested for another one could be looked for in the wrong place and sent twice.
-            $uncertain = $document->status !== DocumentStatus::Pending;
             $this->settle(
                 $document,
-                $uncertain ? DocumentStatus::Unknown : DocumentStatus::Failed,
+                $document->status === DocumentStatus::Pending ? DocumentStatus::Failed : DocumentStatus::Unknown,
                 self::COMPANY_CHANGED,
-                "The document was requested for Moloni company {$document->company_id}, which is no longer the configured company.",
+                Message::get('The document was requested for Moloni company :company, which is no longer the configured company.', ['company' => (string) $document->company_id]),
             );
 
             return;
@@ -166,35 +208,49 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             return;
         }
 
-        if (in_array($document->status, [DocumentStatus::Issuing, DocumentStatus::Unknown], true) && $reconcile($document)) {
-            return;
-        }
-
-        try {
-            $payload = $this->payload($document, $customers, $taxes, $products, $settings);
-        } catch (MoloniException $e) {
-            $this->failBeforeInsert($document, $e);
-
-            return;
-        }
-
-        $document->status = DocumentStatus::Issuing;
         $document->attempts++;
         $document->save();
+
+        try {
+            if ($reconcile($document)) {
+                return;
+            }
+        } catch (MoloniException $e) {
+            $this->failBeforeInsert($document, $e, absentInMoloni: false);
+
+            return;
+        }
+
+        $today = Moloni::today();
+
+        try {
+            $payload = $this->payload($document, $customers, $taxes, $products, $settings, $today);
+        } catch (MoloniException $e) {
+            // The reconciliation just found nothing, so nothing of this document exists in Moloni.
+            $this->failBeforeInsert($document, $e, absentInMoloni: true);
+
+            return;
+        }
+
+        $document = $this->markIssuing($document);
+
+        if ($document === null) {
+            return;
+        }
 
         try {
             $documentId = $client->insert($document->type, $payload);
         } catch (MoloniException $e) {
             match ($e->type) {
                 // Only the token request can fail this way, before anything was sent.
-                FailureType::Transient => $this->failBeforeInsert($this->backToPending($document), $e),
+                FailureType::Transient => $this->failBeforeInsert($this->backToPending($document), $e, absentInMoloni: true),
                 FailureType::Unknown => $this->settle($document, DocumentStatus::Unknown, $e->type->value, $this->message($e)),
-                default => $this->markFailed($document, $e),
+                default => $this->settle($document, DocumentStatus::Failed, $e->type->value, $this->message($e)),
             };
 
             return;
         } catch (Throwable $e) {
-            $this->settle($document, DocumentStatus::Unknown, FailureType::Unknown->value, 'The document may have been issued: '.class_basename($e).'.');
+            $this->settle($document, DocumentStatus::Unknown, FailureType::Unknown->value, Message::get('The document may have been issued: :error.', ['error' => class_basename($e)]));
 
             return;
         }
@@ -205,9 +261,44 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         $this->finish($document, $client);
     }
 
+    private function needsReadBack(InvoiceDocument $document): bool
+    {
+        return $document->status === DocumentStatus::Issued
+            && $document->error_type === self::READBACK_FAILED
+            && $document->document_id !== null;
+    }
+
+    /**
+     * Compare-and-set to Issuing, committed before the insert: the row is re-read under a row lock
+     * and the insert is abandoned when anything moved it since this run loaded it. Returns the
+     * row now marked Issuing, or null.
+     */
+    private function markIssuing(InvoiceDocument $loaded): ?InvoiceDocument
+    {
+        return $loaded->getConnection()->transaction(function () use ($loaded) {
+            $current = InvoiceDocument::query()->whereKey($loaded->getKey())->lockForUpdate()->first();
+
+            if ($current === null
+                || $current->status !== $loaded->status
+                || $current->document_id !== null
+                || $current->attempts !== $loaded->attempts) {
+                return null;
+            }
+
+            $current->fill([
+                'status' => DocumentStatus::Issuing,
+                'customer_id' => $loaded->customer_id,
+                'customer_number' => $loaded->customer_number,
+                'due_at' => $loaded->due_at,
+            ])->save();
+
+            return $current;
+        });
+    }
+
     /**
      * Resolves the customer, products and taxes, and builds the insert payload from the frozen
-     * request. Sets the customer on the row; it is saved with the Issuing status.
+     * request. Sets the customer and due date on the row (not saved: issuing() takes them over).
      *
      * @return array<string, mixed>
      */
@@ -217,6 +308,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         TaxResolver $taxes,
         ProductResolver $products,
         MoloniSettings $settings,
+        CarbonImmutable $today,
     ): array {
         $frozen = $document->payload ?? throw new InvalidArgumentException("The document {$document->getKey()} has no frozen payload.");
         $invoice = InvoiceData::fromArray(Payload::requiredArray($frozen, 'invoice', 'document'));
@@ -226,6 +318,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         $customer = $customers->resolve($invoice->customer);
         $document->customer_id = $customer->id;
         $document->customer_number = $customer->number;
+        $document->due_at = Carbon::instance($today->addDays($dueInDays));
 
         $lines = [];
         $sentLines = [];
@@ -258,7 +351,6 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             throw new MoloniException(__("The document total changes with Moloni's tax rates: line tax rates must match Moloni's rates exactly."), FailureType::Validation);
         }
 
-        $today = Moloni::today();
         $maturityDateId = $settings->maturity_dates[$dueInDays] ?? null;
 
         if ($maturityDateId === null && $document->type === DocumentType::Invoice) {
@@ -308,7 +400,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
      * Reads the inserted document back for its number and total. The document is issued whatever
      * the read-back says; a total that differs from the expected one is flagged.
      */
-    private function finish(InvoiceDocument $document, MoloniClient $client): void
+    private function finish(InvoiceDocument $document, MoloniClient $client, bool $announce = true): void
     {
         $errorType = null;
         $errorMessage = null;
@@ -320,15 +412,16 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
             if ($total !== $document->expected_total_cents) {
                 $errorType = self::TOTAL_MISMATCH;
-                $errorMessage = sprintf(
-                    'Moloni computed a total of %s instead of %s.',
-                    $total === null ? '?' : number_format($total / 100, 2, '.', ''),
-                    number_format($document->expected_total_cents / 100, 2, '.', ''),
-                );
+                $errorMessage = Message::get('Moloni computed a total of :moloni instead of :expected.', [
+                    'moloni' => $total === null ? '?' : number_format($total / 100, 2, '.', ''),
+                    'expected' => number_format($document->expected_total_cents / 100, 2, '.', ''),
+                ]);
             }
         } catch (Throwable $e) {
             $errorType = self::READBACK_FAILED;
-            $errorMessage = $e instanceof MoloniException ? $this->message($e) : 'The document could not be read back: '.class_basename($e).'.';
+            $errorMessage = $e instanceof MoloniException
+                ? $this->message($e)
+                : Message::get('The document could not be read back: :error.', ['error' => class_basename($e)]);
         }
 
         $document->fill([
@@ -338,23 +431,28 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             'error_message' => $errorMessage === null ? null : Str::limit($errorMessage, self::MAX_ERROR_LENGTH),
         ])->save();
 
-        Event::dispatch(new DocumentIssued($document));
+        if ($announce) {
+            Event::dispatch(new DocumentIssued($document));
+        }
     }
 
     /**
-     * Before the insert nothing exists in Moloni. What may work later (a lost connection, an
-     * uncertain customer or product write, which the resolvers find on the next attempt) is
-     * retried with backoff; the rest fails now.
+     * A failure before the insert. What may work later (a lost connection, an uncertain customer
+     * or product write, which the resolvers find on the next attempt) is retried with backoff
+     * until the row's last attempt. Giving up fails the row when nothing of it can exist in
+     * Moloni (it is Pending, or this run's reconciliation found nothing); otherwise it is left
+     * Unknown.
      */
-    private function failBeforeInsert(InvoiceDocument $document, MoloniException $e): void
+    private function failBeforeInsert(InvoiceDocument $document, MoloniException $e, bool $absentInMoloni): void
     {
         $retryable = in_array($e->type, [FailureType::Transient, FailureType::Unknown], true);
 
-        if ($retryable && $this->attempts() < $this->tries) {
+        if ($retryable && $document->attempts < $this->tries) {
             throw $e;
         }
 
-        $this->markFailed($document, $e);
+        $absent = $absentInMoloni || $document->status === DocumentStatus::Pending;
+        $this->settle($document, $absent ? DocumentStatus::Failed : DocumentStatus::Unknown, $e->type->value, $this->message($e));
     }
 
     private function backToPending(InvoiceDocument $document): InvoiceDocument
@@ -365,9 +463,10 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         return $document;
     }
 
-    private function markFailed(InvoiceDocument $document, MoloniException $e): void
+    private function jobFailedMessage(?Throwable $e): string
     {
-        $this->settle($document, DocumentStatus::Failed, $e->type->value, $this->message($e));
+        // Other exceptions (database errors, …) may carry data in their message: only the class is kept.
+        return Message::get('The issuing job failed: :error.', ['error' => $e !== null ? class_basename($e) : '?']);
     }
 
     private function settle(InvoiceDocument $document, DocumentStatus $status, string $errorType, string $message): void

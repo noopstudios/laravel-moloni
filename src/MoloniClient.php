@@ -53,23 +53,21 @@ class MoloniClient
     }
 
     /**
-     * Closed documents whose our_reference is exactly the reference, from documents/getAll (the
-     * listing whose row fields are confirmed). Moloni's filter is exact but not unique, so every
-     * page is read and the match is checked again here. The type is not filtered on: callers
-     * match the series, customer and total.
+     * Documents of the type whose our_reference is exactly the reference, from the type's own
+     * getAll (an exact, non-unique filter: every page is read and the match is checked again).
+     * Rows whose reference is another string, or whose status is known and not 1 (drafts,
+     * cancelled documents), are left out; a row missing either is kept, so callers fail closed.
      *
      * @return list<array<string, mixed>>
      */
     public function findByReference(DocumentType $type, string $reference): array
     {
-        $rows = $this->connector->readAll('documents/getAll', ['our_reference' => $reference]);
+        $rows = $this->connector->readAll($this->endpoint($type).'/getAll', ['our_reference' => $reference]);
 
         /** @var list<array<string, mixed>> */
         return array_values(array_filter($rows, fn (mixed $row) => is_array($row)
-            && ($row['our_reference'] ?? null) === $reference
-            && is_numeric($row['status'] ?? null)
-            && (int) $row['status'] === 1
-            && is_numeric($row['document_id'] ?? null)));
+            && (! is_string($row['our_reference'] ?? null) || $row['our_reference'] === $reference)
+            && (! is_numeric($row['status'] ?? null) || (int) $row['status'] === 1)));
     }
 
     /**

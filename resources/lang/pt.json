@@ -40,5 +40,13 @@
     "No maturity date is configured for :days days.": "Não está configurado nenhum prazo de vencimento de :days dias.",
     "Only an issued or unconfirmed invoice or invoice-receipt can be reissued.": "Só é possível reemitir uma fatura ou fatura-recibo emitida ou por confirmar.",
     "The document total changes with Moloni's tax rates: line tax rates must match Moloni's rates exactly.": "O total do documento muda com as taxas de IVA do Moloni: as taxas das linhas têm de coincidir exatamente com as do Moloni.",
-    "Dispatched :count Moloni documents again.": "Foram reenviados :count documentos do Moloni."
+    "Dispatched :count Moloni documents again.": "Foram reenviados :count documentos do Moloni.",
+    "Moloni already has :count document(s) with the reference :reference in this series that cannot be confirmed as this one; check them in Moloni.": "O Moloni já tem :count documento(s) com a referência :reference nesta série que não é possível confirmar como sendo este; verifique-os no Moloni.",
+    "The document was requested for Moloni company :company, which is no longer the configured company.": "O documento foi pedido para a empresa :company do Moloni, que já não é a empresa configurada.",
+    "The document may have been issued: :error.": "O documento pode ter sido emitido: :error.",
+    "Moloni computed a total of :moloni instead of :expected.": "O Moloni calculou um total de :moloni em vez de :expected.",
+    "The document could not be read back: :error.": "Não foi possível voltar a ler o documento: :error.",
+    "The issuing job failed: :error.": "A tarefa de emissão falhou: :error.",
+    "The document :reference is being processed; try again in a moment.": "O documento :reference está a ser processado; tente novamente daqui a pouco.",
+    ":count Moloni documents failed while being dispatched again.": ":count documentos do Moloni falharam ao ser reenviados."
 }
