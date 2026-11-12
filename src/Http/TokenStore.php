@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
+use SensitiveParameter;
 use Throwable;
 
 class TokenStore
@@ -41,7 +42,7 @@ class TokenStore
     /**
      * Drops the cached access token, unless another caller already replaced it.
      */
-    public function forget(string $accessToken): void
+    public function forget(#[SensitiveParameter] string $accessToken): void
     {
         if ($this->cachedAccessToken() === $accessToken) {
             Cache::forget($this->cacheKey('access'));
@@ -60,6 +61,7 @@ class TokenStore
             $this->cachedRefreshToken(),
             $this->config('client_secret'),
             $this->config('password'),
+            $this->config('email'),
         ], fn (?string $secret) => $secret !== null && $secret !== ''));
     }
 
@@ -99,7 +101,7 @@ class TokenStore
      * @param  array<string, string|null>  $queryParams
      * @return array{access_token: string, refresh_token: string, expires_in: int}|null
      */
-    private function grant(string $grantType, array $queryParams): ?array
+    private function grant(string $grantType, #[SensitiveParameter] array $queryParams): ?array
     {
         try {
             $response = Http::asForm()
@@ -111,8 +113,9 @@ class TokenStore
                     'client_id' => $this->config('client_id'),
                     'client_secret' => $this->config('client_secret'),
                 ]);
-        } catch (StrayRequestException $e) {
-            throw $e;
+        } catch (StrayRequestException) {
+            // Laravel's message embeds the full URL, whose query string carries the credentials.
+            throw new StrayRequestException($this->config('base_url').'grant/');
         } catch (Throwable) {
             // The original exception is dropped on purpose: its message may contain request details.
             throw new MoloniException('Could not connect to Moloni to obtain a token.', FailureType::Transient);
@@ -142,7 +145,7 @@ class TokenStore
     /**
      * @param  array{access_token: string, refresh_token: string, expires_in: int}  $tokens
      */
-    private function store(array $tokens): string
+    private function store(#[SensitiveParameter] array $tokens): string
     {
         Cache::put($this->cacheKey('access'), $tokens['access_token'], max(1, $tokens['expires_in'] - self::SAFETY_MARGIN_SECONDS));
         Cache::put($this->cacheKey('refresh'), $tokens['refresh_token'], self::REFRESH_TOKEN_SECONDS - self::SAFETY_MARGIN_SECONDS);

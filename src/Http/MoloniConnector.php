@@ -8,6 +8,7 @@ use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Support\Facades\Http;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
+use SensitiveParameter;
 use Throwable;
 
 class MoloniConnector
@@ -111,8 +112,9 @@ class MoloniConnector
                 ->connectTimeout((int) config('moloni.connect_timeout'))
                 ->withQueryParameters(['access_token' => $token, 'json' => 'true', 'human_errors' => 'true'])
                 ->post($this->url($endpoint), $params);
-        } catch (StrayRequestException $e) {
-            throw $e;
+        } catch (StrayRequestException) {
+            // Laravel's message embeds the full URL, whose query string carries the access token.
+            throw new StrayRequestException($this->url($endpoint));
         } catch (Throwable) {
             // Whatever failed, the request may have reached Moloni. The original exception is
             // dropped on purpose: its message can contain the URL with the token.
@@ -163,7 +165,7 @@ class MoloniConnector
      *
      * @return array<array-key, mixed>
      */
-    private function writeResult(string $endpoint, Response $response, mixed $body, string $token): array
+    private function writeResult(string $endpoint, Response $response, mixed $body, #[SensitiveParameter] string $token): array
     {
         if ($response->successful() && is_array($body)) {
             if (! array_is_list($body) && in_array($body['valid'] ?? null, [1, '1'], true)) {
@@ -214,7 +216,13 @@ class MoloniConnector
             }
         };
 
-        $collect(array_key_exists('valid', $body) ? ($body['message'] ?? []) : $body, null);
+        $source = match (true) {
+            array_key_exists('valid', $body) => $body['message'] ?? [],
+            // Top-level scalars of an object (ids, statuses) are not errors; only field-keyed lists are.
+            ! array_is_list($body) => array_filter($body, is_array(...)),
+            default => $body,
+        };
+        $collect($source, null);
 
         if ($errors !== []) {
             return $errors;
@@ -222,24 +230,45 @@ class MoloniConnector
 
         return [$body === []
             ? ['code' => 'empty response', 'description' => 'Moloni returned an empty response.']
-            : ['code' => 'not confirmed', 'description' => 'Moloni did not confirm the write.']];
+            : ['code' => 'not_confirmed', 'description' => 'Moloni did not confirm the operation']];
     }
 
     /**
      * @param  array<array-key, mixed>  $errors
      * @return array<array-key, mixed>
      */
-    private function redact(array $errors, string $token): array
+    private function redact(array $errors, #[SensitiveParameter] string $token): array
     {
-        $secrets = [$token, ...$this->tokens->secrets()];
+        $secrets = [];
+        foreach ([$token, ...$this->tokens->secrets()] as $secret) {
+            array_push($secrets, $secret, rawurlencode($secret), urlencode($secret));
+        }
+        // Longest first, so a secret is never partly replaced by a shorter one it contains.
+        $secrets = array_unique($secrets);
+        usort($secrets, fn (string $a, string $b) => strlen($b) <=> strlen($a));
 
-        array_walk_recursive($errors, function (mixed &$value) use ($secrets) {
-            if (is_string($value)) {
-                $value = str_replace($secrets, '[redacted]', $value);
-            }
-        });
+        return $this->redactWith($errors, $secrets);
+    }
 
-        return $errors;
+    /**
+     * @param  array<array-key, mixed>  $values
+     * @param  list<string>  $secrets
+     * @return array<array-key, mixed>
+     */
+    private function redactWith(array $values, #[SensitiveParameter] array $secrets): array
+    {
+        $redacted = [];
+
+        foreach ($values as $key => $value) {
+            $key = is_string($key) ? str_replace($secrets, '[redacted]', $key) : $key;
+            $redacted[$key] = match (true) {
+                is_string($value) => str_replace($secrets, '[redacted]', $value),
+                is_array($value) => $this->redactWith($value, $secrets),
+                default => $value,
+            };
+        }
+
+        return $redacted;
     }
 
     private function url(string $endpoint): string

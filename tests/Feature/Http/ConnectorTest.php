@@ -211,11 +211,19 @@ it('classifies a write refusal as Validation with normalised errors', function (
     ],
     'valid 0 alone' => [
         ['valid' => 0],
-        [['code' => 'not confirmed', 'description' => 'Moloni did not confirm the write.']],
+        [['code' => 'not_confirmed', 'description' => 'Moloni did not confirm the operation']],
     ],
     'no valid flag' => [
         ['document_id' => 1],
-        [['code' => 'not confirmed', 'description' => 'Moloni did not confirm the write.']],
+        [['code' => 'not_confirmed', 'description' => 'Moloni did not confirm the operation']],
+    ],
+    'no valid flag with scalar values' => [
+        ['document_id' => '7', 'status' => 'ok'],
+        [['code' => 'not_confirmed', 'description' => 'Moloni did not confirm the operation']],
+    ],
+    'field-keyed errors next to scalar values' => [
+        ['document_id' => '7', 'products[0]' => ['1 exemption_reason']],
+        [['code' => '1 exemption_reason', 'description' => '1 exemption_reason', 'field' => 'products[0]']],
     ],
     'empty list' => [
         [],
@@ -388,6 +396,40 @@ it('gives up with Transient after 200 pages', function () {
 
     expect(catchMoloniException(fn () => connectorWithCompany(5)->readAll('products/getAll'))->type)->toBe(FailureType::Transient);
     expect($page)->toBe(200);
+});
+
+it('redacts URL-encoded secrets and secrets in error keys', function () {
+    config(['moloni.password' => 'p@ss w/rd&1', 'moloni.email' => 'owner+shop@example.test']);
+    Http::fake([
+        '*/grant/*' => moloniGrant('tok/en+1', 'refresh-1'),
+        '*/customers/insert/*' => Http::response([
+            'p@ss w/rd&1' => [['code' => '2 name', 'description' => 'raw p%40ss%20w%2Frd%261 plus p%40ss+w%2Frd%261']],
+            'tok%2Fen%2B1' => [['code' => '2 vat', 'description' => 'owner%2Bshop%40example.test']],
+        ]),
+    ]);
+
+    $e = catchMoloniException(fn () => connectorWithCompany(5)->write('customers/insert', ['name' => 'x']));
+    $haystack = json_encode($e->errors, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->errors)->toBe([
+            ['code' => '2 name', 'description' => 'raw [redacted] plus [redacted]', 'field' => '[redacted]'],
+            ['code' => '2 vat', 'description' => '[redacted]', 'field' => '[redacted]'],
+        ]);
+    foreach (['p@ss w/rd&1', 'p%40ss', 'tok/en+1', 'tok%2Fen', 'owner+shop', 'owner%2Bshop'] as $secret) {
+        expect($haystack)->not->toContain($secret);
+    }
+});
+
+it('keeps the access token out of stray-request errors', function () {
+    Http::fake(['*/grant/*' => moloniGrant('access-1', 'refresh-1')]);
+
+    $e = catchStrayRequest(fn () => connectorWithCompany(5)->read('customers/getAll'));
+
+    expect($e->getMessage())->toContain('https://api.moloni.pt/v1/customers/getAll/')
+        ->and($e->getMessage())->not->toContain('access-1')
+        ->and($e->getMessage())->not->toContain('access_token')
+        ->and($e->getPrevious())->toBeNull();
 });
 
 it('never puts credentials or tokens in the exception message', function () {

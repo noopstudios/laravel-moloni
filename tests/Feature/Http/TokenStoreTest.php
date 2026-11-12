@@ -135,14 +135,18 @@ it('falls back to a password login once when the refresh token is rejected', fun
 it('never sends a refresh token again after a failed refresh', function (array $failures, FailureType $type) {
     $sequence = Http::sequence()->push(moloniGrant('access-1', 'refresh-1'));
     foreach ($failures as $failure) {
-        $sequence->push(...$failure);
+        $failure === 'connection'
+            ? $sequence->pushFailedConnection('cURL error 56: recv failure for https://api.moloni.pt/v1/grant/?refresh_token=refresh-1')
+            : $sequence->push(...$failure);
     }
     Http::fake(['*/grant/*' => $sequence->push(moloniGrant('access-2', 'refresh-2'))]);
     $store = app(TokenStore::class);
     $store->accessToken();
     travel(3600)->seconds();
 
-    expect(catchMoloniException(fn () => $store->accessToken())->type)->toBe($type);
+    $e = catchMoloniException(fn () => $store->accessToken());
+    expect($e->type)->toBe($type);
+    expectNoGrantSecrets($e);
     expect($store->accessToken())->toBe('access-2');
 
     expect(Http::recorded(fn (Request $request) => isGrantRequest($request, 'refresh_token')))->toHaveCount(1);
@@ -154,6 +158,8 @@ it('never sends a refresh token again after a failed refresh', function (array $
     ], FailureType::Authentication],
     // The refresh may have consumed the token server-side; the next call logs in instead of re-sending it.
     'server error' => [[['', 503]], FailureType::Transient],
+    // A transport failure may also have consumed it; its message (with the refresh token in the URL) is dropped.
+    'transport exception' => [['connection'], FailureType::Transient],
 ]);
 
 it('throws Authentication when the login is refused', function () {
@@ -186,8 +192,8 @@ it('classifies a grant failure that is not a credential refusal as Transient', f
     $e = catchMoloniException(fn () => app(TokenStore::class)->accessToken());
 
     expect($e->type)->toBe(FailureType::Transient)
-        ->and($e->getPrevious())->toBeNull()
-        ->and($e->getMessage().json_encode($e->errors))->not->toContain('fake-password');
+        ->and($e->getPrevious())->toBeNull();
+    expectNoGrantSecrets($e);
 })->with([
     'connection failure' => fn () => Http::failedConnection(),
     'other exception' => fn () => fn () => throw new RuntimeException('Failed: https://api.moloni.pt/v1/grant/?username=shop%40example.test&password=fake-password'),
@@ -196,6 +202,29 @@ it('classifies a grant failure that is not a credential refusal as Transient', f
     'html body' => [['<html>oops</html>', 200]],
     'client error without an oauth error' => [[['message' => 'Bad Request'], 400]],
 ]);
+
+it('keeps credentials out of stray-request errors', function () {
+    $e = catchStrayRequest(fn () => app(TokenStore::class)->accessToken());
+
+    expect($e->getMessage())->toContain('https://api.moloni.pt/v1/grant/')
+        ->and($e->getPrevious())->toBeNull();
+    expectNoGrantSecrets($e);
+});
+
+it('keeps the refresh token out of stray-request errors', function () {
+    // Only the password grant is faked; a stub returning null lets the refresh fall through as a stray request.
+    Http::fake(['*/grant/*' => fn (Request $request) => $request['grant_type'] === 'password'
+        ? Http::response(moloniGrant('access-1', 'refresh-1'))
+        : null]);
+    $store = app(TokenStore::class);
+    $store->accessToken();
+    travel(3600)->seconds();
+
+    $e = catchStrayRequest(fn () => $store->accessToken());
+
+    expect($e->getMessage())->toContain('https://api.moloni.pt/v1/grant/');
+    expectNoGrantSecrets($e);
+});
 
 it('caps the grant timeouts so a refresh and a login fit inside the lock', function () {
     config(['moloni.timeout' => 60, 'moloni.connect_timeout' => 30]);

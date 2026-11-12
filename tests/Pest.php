@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\Client\StrayRequestException;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Settings\MoloniSettings;
 use Noop\Moloni\Tests\DiscoveryOrderTestCase;
@@ -53,6 +54,32 @@ function grantQuery(Request $request): array
     parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
 
     return $query;
+}
+
+function catchStrayRequest(Closure $call): StrayRequestException
+{
+    try {
+        $call();
+    } catch (StrayRequestException $e) {
+        return $e;
+    }
+
+    Assert::fail('Expected a StrayRequestException, but none was thrown.');
+}
+
+/**
+ * Asserts no login credential or token appears in the exception, its errors or its previous chain.
+ */
+function expectNoGrantSecrets(Throwable $e): void
+{
+    $haystack = $e instanceof MoloniException ? json_encode($e->errors) : '';
+    for ($current = $e; $current !== null; $current = $current->getPrevious()) {
+        $haystack .= $current->getMessage();
+    }
+
+    foreach (['fake-password', 'fake-client-secret', 'shop@example.test', 'shop%40example.test', 'refresh-1', 'access-1'] as $secret) {
+        expect($haystack)->not->toContain($secret);
+    }
 }
 
 function isGrantRequest(Request $request, ?string $grantType = null): bool
