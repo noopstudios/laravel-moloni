@@ -6,6 +6,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\UniqueConstraintViolationException;
 use InvalidArgumentException;
+use Noop\Moloni\Actions\RequestReceipt;
 use Noop\Moloni\Contracts\Invoiceable;
 use Noop\Moloni\Data\PaymentData;
 use Noop\Moloni\Enums\DocumentStatus;
@@ -26,7 +27,10 @@ class Moloni
     /** The only currency the package issues in for now. */
     private const CURRENCY = 'EUR';
 
-    public function __construct(private readonly MoloniClient $client) {}
+    public function __construct(
+        private readonly MoloniClient $client,
+        private readonly RequestReceipt $receipts,
+    ) {}
 
     /**
      * An invoice due in $dueInDays days, which needs a maturity date configured for that term.
@@ -50,6 +54,32 @@ class Moloni
     public function invoiceReceipt(Invoiceable $invoiceable, PaymentData $payment): InvoiceDocument
     {
         return $this->request(DocumentType::InvoiceReceipt, $invoiceable, $payment, 0);
+    }
+
+    /**
+     * One receipt for $payment, settling issued invoices of one Moloni customer with an amount per
+     * invoice: $allocations is a list of [InvoiceDocument, cents]. The amounts must add up to the
+     * payment and fit what each invoice still owes; invoices of a final consumer are settled one
+     * per receipt. $owner (any saved model) becomes the receipt's invoiceable.
+     *
+     * Without $idempotencyKey every call records a new receipt. A caller reacting to a payment
+     * should pass the payment's id: a repeated call then returns the same receipt, and refuses
+     * other invoices or amounts under that key.
+     *
+     * @param  list<array{0: InvoiceDocument, 1: int}>  $allocations
+     *
+     * @throws InvalidArgumentException When the allocations or the payment cannot be settled.
+     * @throws MoloniException When the settings cannot issue a receipt (Validation).
+     */
+    public function receipt(Model $owner, array $allocations, PaymentData $payment, ?string $idempotencyKey = null): InvoiceDocument
+    {
+        [$receipt, $created] = ($this->receipts)($owner, $allocations, $payment, $idempotencyKey);
+
+        if ($created) {
+            $this->dispatch($receipt);
+        }
+
+        return $receipt;
     }
 
     /**
@@ -97,7 +127,8 @@ class Moloni
     }
 
     /**
-     * Sends a failed document again, on the same row, with its attempts counted from zero.
+     * Sends a failed document again, on the same row, with its attempts counted from zero. A
+     * receipt is sent again only while its allocations still fit what its invoices owe.
      */
     public function retry(InvoiceDocument $document): void
     {
@@ -109,6 +140,10 @@ class Moloni
 
                     if ($current->status !== DocumentStatus::Failed) {
                         throw new MoloniException(__('Only a failed document can be retried.'), FailureType::Validation);
+                    }
+
+                    if ($current->type === DocumentType::Receipt) {
+                        $this->receipts->assertStillFits($current);
                     }
 
                     $current->fill(['status' => DocumentStatus::Pending, 'error_type' => null, 'error_message' => null, 'attempts' => 0])->save();

@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 use Noop\Moloni\Actions\ReconcileDocument;
+use Noop\Moloni\Actions\RequestReceipt;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\InvoiceLine;
 use Noop\Moloni\Data\PaymentData;
@@ -239,7 +240,9 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         $today = Moloni::today();
 
         try {
-            $payload = $this->payload($document, $customers, $taxes, $products, $settings, $today);
+            $payload = $document->type === DocumentType::Receipt
+                ? $this->receiptPayload($document, $settings, $today)
+                : $this->payload($document, $customers, $taxes, $products, $settings, $today);
         } catch (MoloniException $e) {
             // The reconciliation just found nothing, so nothing of this document exists in Moloni.
             $this->failBeforeInsert($document, $e, absentInMoloni: true);
@@ -434,6 +437,34 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
     }
 
     /**
+     * A receipt needs no customer, product or tax resolution: its customer and allocations were
+     * fixed when it was requested. Moloni checks each allocation against the invoice's open
+     * balance but not the total against the allocations, which the request already guarantees.
+     *
+     * @return array<string, mixed>
+     */
+    private function receiptPayload(InvoiceDocument $document, MoloniSettings $settings, CarbonImmutable $today): array
+    {
+        $frozen = $document->payload ?? throw new InvalidArgumentException("The receipt {$document->getKey()} has no frozen payload.");
+        $payment = PaymentData::fromArray(Payload::requiredArray($frozen, 'payment', 'receipt'));
+        $customerId = $document->customer_id ?? throw new InvalidArgumentException("The receipt {$document->getKey()} has no Moloni customer.");
+
+        return [
+            'company_id' => $document->company_id,
+            'date' => $today->toDateString(),
+            'document_set_id' => $document->document_set_id,
+            'customer_id' => $customerId,
+            'net_value' => round($document->expected_total_cents / 100, 2),
+            'associated_documents' => array_map(fn (array $allocation) => [
+                'associated_id' => $allocation['moloni_document_id'],
+                'value' => round($allocation['amount_cents'] / 100, 2),
+            ], RequestReceipt::allocationsOf($document)),
+            'payments' => [$this->payment($document, $payment, $settings)],
+            'status' => 1,
+        ];
+    }
+
+    /**
      * Exactly the document total: Moloni does not check the payments against it.
      *
      * @return array<string, mixed>
@@ -441,7 +472,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
     private function payment(InvoiceDocument $document, ?PaymentData $payment, MoloniSettings $settings): array
     {
         if ($payment === null) {
-            throw new InvalidArgumentException("The invoice-receipt {$document->getKey()} has no frozen payment.");
+            throw new InvalidArgumentException("The {$document->type->value} {$document->getKey()} has no frozen payment.");
         }
 
         $methodId = $settings->payment_methods[$payment->method]

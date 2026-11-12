@@ -4,6 +4,7 @@ namespace Noop\Moloni\Actions;
 
 use Illuminate\Support\Facades\Event;
 use Noop\Moloni\Enums\DocumentStatus;
+use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Events\DocumentFailed;
 use Noop\Moloni\Events\DocumentIssued;
 use Noop\Moloni\Models\InvoiceDocument;
@@ -22,10 +23,20 @@ use Noop\Moloni\Support\Vat;
  * - None: nothing of this document exists, so it may be issued.
  * - Exactly one, with the row's customer and total: adopted.
  * - Anything else: the row is left Unknown for a person to decide.
+ *
+ * Receipts carry no our_reference in Moloni, so they are looked for on the invoices they settle
+ * instead: each invoice is read (documents/getOne) and its reverse associations give the closed
+ * receipts in the row's series that settle it, less those recorded on another local row. None on
+ * any invoice: issue. One receipt on every invoice, with the row's amount on each and the row's
+ * total: adopted. Anything else (on some invoices only, other amounts, more than one, an entry
+ * that cannot be read): Unknown.
  */
 class ReconcileDocument
 {
     public const AMBIGUOUS = 'ambiguous_reconciliation';
+
+    /** Moloni's document_type_id of a receipt (3 is a credit note). */
+    private const RECEIPT_TYPE_ID = 2;
 
     public function __construct(private readonly MoloniClient $client) {}
 
@@ -35,6 +46,10 @@ class ReconcileDocument
      */
     public function __invoke(InvoiceDocument $document): bool
     {
+        if ($document->type === DocumentType::Receipt) {
+            return $this->reconcileReceipt($document);
+        }
+
         $blocking = array_values(array_filter(
             $this->client->findByReference($document->type, $document->reference),
             fn (array $row) => $this->blocks($document, $row),
@@ -45,30 +60,150 @@ class ReconcileDocument
         }
 
         if (count($blocking) === 1 && $this->adoptable($document, $blocking[0])) {
-            $document->fill([
-                'status' => DocumentStatus::Issued,
-                'document_id' => (int) $blocking[0]['document_id'],
-                'document_number' => MoloniClient::documentNumber($blocking[0]),
-                'issued_at' => now(),
-                'error_type' => null,
-                'error_message' => null,
-            ])->save();
-            Event::dispatch(new DocumentIssued($document));
+            $this->adopt($document, (int) $blocking[0]['document_id'], MoloniClient::documentNumber($blocking[0]));
 
             return true;
         }
 
+        $this->leaveUnknown($document, Message::get('Moloni already has :count document(s) with the reference :reference in this series that cannot be confirmed as this one; check them in Moloni.', [
+            'count' => count($blocking),
+            'reference' => $document->reference,
+        ]));
+
+        return true;
+    }
+
+    private function reconcileReceipt(InvoiceDocument $receipt): bool
+    {
+        $allocations = RequestReceipt::allocationsOf($receipt);
+        $found = [];
+
+        foreach ($allocations as $index => $allocation) {
+            $found[$index] = $this->unrecordedReceipts($receipt, $this->client->document($allocation['moloni_document_id']));
+        }
+
+        $all = array_merge(...$found);
+
+        if ($all === []) {
+            return false;
+        }
+
+        $ids = array_values(array_unique(array_map(fn (array $candidate) => $candidate['id'], $all), SORT_REGULAR));
+        $receiptId = count($ids) === 1 ? $ids[0] : null;
+
+        if ($receiptId !== null && $this->receiptMatches($receipt, $allocations, $found)) {
+            $this->adopt($receipt, $receiptId, MoloniClient::documentNumber($this->client->document($receiptId)));
+
+            return true;
+        }
+
+        $this->leaveUnknown($receipt, Message::get('Moloni already has receipts on the invoices of :reference that cannot be confirmed as this one; check them in Moloni.', [
+            'reference' => $receipt->reference,
+        ]));
+
+        return true;
+    }
+
+    /**
+     * The closed receipts in the row's series that settle the invoice and are not recorded on
+     * another local row, with the value they settle on it and their total. An entry that cannot
+     * be read is kept with a null id, so it blocks.
+     *
+     * @param  array<string, mixed>  $invoice  As documents/getOne returns it.
+     * @return list<array{id: int|null, value: int|null, total: int|null}>
+     */
+    private function unrecordedReceipts(InvoiceDocument $receipt, array $invoice): array
+    {
+        $unreadable = ['id' => null, 'value' => null, 'total' => null];
+        $reverse = $invoice['reverse_associated_documents'] ?? null;
+
+        if (! is_array($reverse)) {
+            return [$unreadable];
+        }
+
+        $found = [];
+
+        foreach ($reverse as $entry) {
+            $settling = is_array($entry) ? ($entry['reverse_associated_document'] ?? null) : null;
+
+            if (! is_array($entry) || ! is_array($settling)) {
+                $found[] = $unreadable;
+
+                continue;
+            }
+
+            $type = $settling['document_type_id'] ?? null;
+            $status = $settling['status'] ?? null;
+            $setId = $settling['document_set_id'] ?? null;
+
+            if ((is_numeric($type) && (int) $type !== self::RECEIPT_TYPE_ID)
+                || (is_numeric($status) && (int) $status !== 1)
+                || (is_numeric($setId) && (int) $setId !== $receipt->document_set_id)) {
+                continue;
+            }
+
+            $id = $entry['document_id'] ?? null;
+            $settlingId = $settling['document_id'] ?? $id;
+            $readable = is_numeric($type) && is_numeric($status) && is_numeric($setId)
+                && is_numeric($id) && is_numeric($settlingId) && (int) $id === (int) $settlingId;
+
+            if ($readable && $this->recordedElsewhere($receipt, (int) $id)) {
+                continue;
+            }
+
+            $found[] = [
+                'id' => $readable ? (int) $id : null,
+                'value' => MoloniClient::cents($entry['value'] ?? null),
+                'total' => MoloniClient::cents($settling['net_value'] ?? null),
+            ];
+        }
+
+        return $found;
+    }
+
+    /**
+     * Whether the one receipt found settles exactly the row's amount on every invoice, and has
+     * the row's total.
+     *
+     * @param  list<array{invoice_document_id: int, moloni_document_id: int, amount_cents: int}>  $allocations
+     * @param  array<int, list<array{id: int|null, value: int|null, total: int|null}>>  $found
+     */
+    private function receiptMatches(InvoiceDocument $receipt, array $allocations, array $found): bool
+    {
+        foreach ($allocations as $index => $allocation) {
+            $candidates = $found[$index];
+
+            if (count($candidates) !== 1
+                || $candidates[0]['value'] !== $allocation['amount_cents']
+                || $candidates[0]['total'] !== $receipt->expected_total_cents) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function adopt(InvoiceDocument $document, int $documentId, ?string $documentNumber): void
+    {
+        $document->fill([
+            'status' => DocumentStatus::Issued,
+            'document_id' => $documentId,
+            'document_number' => $documentNumber,
+            'issued_at' => now(),
+            'error_type' => null,
+            'error_message' => null,
+        ])->save();
+        Event::dispatch(new DocumentIssued($document));
+    }
+
+    private function leaveUnknown(InvoiceDocument $document, string $message): void
+    {
         $document->fill([
             'status' => DocumentStatus::Unknown,
             'error_type' => self::AMBIGUOUS,
-            'error_message' => Message::get('Moloni already has :count document(s) with the reference :reference in this series that cannot be confirmed as this one; check them in Moloni.', [
-                'count' => count($blocking),
-                'reference' => $document->reference,
-            ]),
+            'error_message' => $message,
         ])->save();
         Event::dispatch(new DocumentFailed($document));
-
-        return true;
     }
 
     /**

@@ -48,5 +48,21 @@
     "The document could not be read back: :error.": "Não foi possível voltar a ler o documento: :error.",
     "The issuing job failed: :error.": "A tarefa de emissão falhou: :error.",
     "The document :reference is being processed; try again in a moment.": "O documento :reference está a ser processado; tente novamente daqui a pouco.",
-    ":count Moloni documents failed while being dispatched again.": ":count documentos do Moloni falharam ao ser reenviados."
+    ":count Moloni documents failed while being dispatched again.": ":count documentos do Moloni falharam ao ser reenviados.",
+    "The owner of a receipt must be a saved model.": "O titular de um recibo tem de ser um modelo guardado.",
+    "A receipt idempotency key cannot be empty.": "A chave de idempotência de um recibo não pode estar vazia.",
+    "The receipt idempotency key is too long.": "A chave de idempotência do recibo é demasiado longa.",
+    "The amounts settled add up to :allocated, not to the payment of :paid.": "Os valores liquidados somam :allocated, e não o pagamento de :paid.",
+    "A receipt needs a list of invoices, each with the amount it settles.": "Um recibo precisa de uma lista de faturas, cada uma com o valor que liquida.",
+    "Each receipt allocation must be a saved invoice and an amount in cents.": "Cada linha do recibo tem de ser uma fatura guardada e um valor em cêntimos.",
+    "The invoice :invoice appears more than once in the receipt.": "A fatura :invoice aparece mais de uma vez no recibo.",
+    "The amount settled on :invoice must be greater than zero.": "O valor liquidado na fatura :invoice tem de ser superior a zero.",
+    "The receipt key :key was already used for other invoices or amounts.": "A chave de recibo :key já foi usada para outras faturas ou valores.",
+    "Only issued invoices can be settled by a receipt, and :invoice is not one.": "Só é possível liquidar faturas emitidas com um recibo, e :invoice não o é.",
+    "The invoice :invoice belongs to another Moloni company.": "A fatura :invoice pertence a outra empresa do Moloni.",
+    "The invoices settled by one receipt must belong to the same Moloni customer.": "As faturas liquidadas por um recibo têm de pertencer ao mesmo cliente do Moloni.",
+    "Invoices of a final consumer cannot be settled together by one receipt.": "As faturas de um consumidor final não podem ser liquidadas em conjunto por um recibo.",
+    "The amount of :amount for :invoice is more than the :outstanding it still owes.": "O valor de :amount para :invoice excede os :outstanding que a fatura ainda deve.",
+    "The receipt :reference no longer fits what its invoices still owe: :reason": "O recibo :reference já não cabe no que as faturas ainda devem: :reason",
+    "Moloni already has receipts on the invoices of :reference that cannot be confirmed as this one; check them in Moloni.": "O Moloni já tem recibos nas faturas de :reference que não é possível confirmar como sendo este; verifique-os no Moloni."
 }
