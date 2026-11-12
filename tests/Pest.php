@@ -43,6 +43,16 @@ function catchMoloniException(Closure $call): MoloniException
     Assert::fail('Expected a MoloniException, but none was thrown.');
 }
 
+/**
+ * @return array<array-key, mixed>
+ */
+function grantQuery(Request $request): array
+{
+    parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+    return $query;
+}
+
 function isGrantRequest(Request $request, ?string $grantType = null): bool
 {
     return str_contains($request->url(), '/grant/')

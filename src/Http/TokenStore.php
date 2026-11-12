@@ -65,20 +65,19 @@ class TokenStore
 
     private function obtainTokens(): string
     {
+        // Refresh tokens are single-use: take it out of the cache before sending it, so a refresh
+        // that fails in any way is never retried with the same token.
         $refreshToken = $this->cachedRefreshToken();
+        Cache::forget($this->cacheKey('refresh'));
 
         if ($refreshToken !== null) {
-            $tokens = $this->grant([
-                'grant_type' => 'refresh_token',
-                'refresh_token' => $refreshToken,
-            ]);
+            $tokens = $this->grant('refresh_token', ['refresh_token' => $refreshToken]);
             if ($tokens !== null) {
                 return $this->store($tokens);
             }
         }
 
-        $tokens = $this->grant([
-            'grant_type' => 'password',
+        $tokens = $this->grant('password', [
             'username' => $this->config('email'),
             'password' => $this->config('password'),
         ]);
@@ -93,17 +92,22 @@ class TokenStore
     /**
      * Returns the token response, or null when Moloni refused the grant.
      *
-     * @param  array<string, string|null>  $params
+     * Moloni reads username, password and refresh_token only from the query string (it ignores
+     * them in any body), so only grant_type and the client credentials travel in the form body.
+     * The URL therefore carries secrets: it must never reach an exception, its errors or a log.
+     *
+     * @param  array<string, string|null>  $queryParams
      * @return array{access_token: string, refresh_token: string, expires_in: int}|null
      */
-    private function grant(array $params): ?array
+    private function grant(string $grantType, array $queryParams): ?array
     {
         try {
             $response = Http::asForm()
                 ->timeout(min((int) config('moloni.timeout'), self::GRANT_TIMEOUT_SECONDS))
                 ->connectTimeout(min((int) config('moloni.connect_timeout'), self::GRANT_CONNECT_TIMEOUT_SECONDS))
+                ->withQueryParameters($queryParams)
                 ->post($this->config('base_url').'grant/', [
-                    ...$params,
+                    'grant_type' => $grantType,
                     'client_id' => $this->config('client_id'),
                     'client_secret' => $this->config('client_secret'),
                 ]);

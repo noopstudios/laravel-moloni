@@ -124,63 +124,88 @@ class MoloniConnector
             throw new MoloniException("Moloni does not know the endpoint {$endpoint}.", FailureType::Validation);
         }
 
-        $errors = $isWrite || ! $response->successful() ? $this->validationErrors($response) : null;
-        if ($errors !== null) {
-            throw new MoloniException("Moloni rejected the data sent to {$endpoint}.", FailureType::Validation, $this->redact($errors, $token));
-        }
-
         $body = $response->json();
+
+        if ($isWrite) {
+            return $this->writeResult($endpoint, $response, $body, $token);
+        }
 
         if (! $response->successful() || ! is_array($body)) {
             // A read never changes anything, so it is never Unknown: a refused read is Validation, the rest can be retried.
-            $type = match (true) {
-                $isWrite => FailureType::Unknown,
-                $response->clientError() && $response->status() !== 429 => FailureType::Validation,
-                default => FailureType::Transient,
-            };
+            $type = $response->clientError() && $response->status() !== 429 ? FailureType::Validation : FailureType::Transient;
 
             throw new MoloniException("Moloni returned an unexpected response for {$endpoint}.", $type);
-        }
-
-        if ($isWrite && (array_is_list($body) || ! is_numeric($body['valid'] ?? null) || (int) $body['valid'] !== 1)) {
-            throw new MoloniException("Moloni did not confirm the write to {$endpoint}.", FailureType::Unknown);
         }
 
         return $body;
     }
 
     /**
-     * Field errors (a list of {code, description}) or a `valid: 0` write response.
-     * Only checked on writes and non-2xx responses, so read rows are never mistaken for errors.
-     * Both shapes are still to be confirmed against the sandbox; keep the parsing here.
+     * Moloni confirms a write only with `valid` 1. Any other JSON body on a 2xx is a refusal:
+     * field errors come back as HTTP 200 in several shapes, and `{valid: 0, message}` on some endpoints.
      *
-     * @return array<array-key, mixed>|null
+     * @return array<array-key, mixed>
      */
-    private function validationErrors(Response $response): ?array
+    private function writeResult(string $endpoint, Response $response, mixed $body, string $token): array
     {
-        $body = $response->json();
-
-        if (! is_array($body) || $body === []) {
-            return null;
-        }
-
-        if (array_is_list($body)) {
-            foreach ($body as $error) {
-                if (! is_array($error)
-                    || ! isset($error['code'], $error['description'])
-                    || array_diff(array_keys($error), ['code', 'description']) !== []) {
-                    return null;
-                }
+        if ($response->successful() && is_array($body)) {
+            if (! array_is_list($body) && in_array($body['valid'] ?? null, [1, '1'], true)) {
+                return $body;
             }
 
-            return $body;
+            throw new MoloniException(
+                "Moloni rejected the data sent to {$endpoint}.",
+                FailureType::Validation,
+                $this->redact($this->normaliseErrors($body), $token),
+            );
         }
 
-        if (is_numeric($body['valid'] ?? null) && (int) $body['valid'] === 0) {
-            return $body;
+        if ($response->status() === 400 && is_array($body) && isset($body['error'])) {
+            $error = ['code' => $body['error'], 'description' => $body['error_description'] ?? $body['error']];
+
+            throw new MoloniException("Moloni rejected the request to {$endpoint}.", FailureType::Validation, $this->redact([$error], $token));
         }
 
-        return null;
+        throw new MoloniException("Moloni returned an unexpected response for {$endpoint}.", FailureType::Unknown);
+    }
+
+    /**
+     * Flattens Moloni's error shapes into a list of {code, description[, field]}:
+     * a flat list of {code, description}, one nested list per document line, an object keyed
+     * by `field[index]`, plain code strings (without human_errors), or `{valid: 0, message: [...]}`.
+     *
+     * @param  array<array-key, mixed>  $body
+     * @return list<array<string, mixed>>
+     */
+    private function normaliseErrors(array $body): array
+    {
+        $errors = [];
+
+        $collect = function (mixed $value, ?string $field) use (&$collect, &$errors): void {
+            if (is_array($value) && isset($value['code'])) {
+                $errors[] = [
+                    'code' => $value['code'],
+                    'description' => $value['description'] ?? $value['code'],
+                    ...($field !== null ? ['field' => $field] : []),
+                ];
+            } elseif (is_string($value)) {
+                $errors[] = ['code' => $value, 'description' => $value, ...($field !== null ? ['field' => $field] : [])];
+            } elseif (is_array($value)) {
+                foreach ($value as $key => $item) {
+                    $collect($item, is_string($key) ? $key : $field);
+                }
+            }
+        };
+
+        $collect(array_key_exists('valid', $body) ? ($body['message'] ?? []) : $body, null);
+
+        if ($errors !== []) {
+            return $errors;
+        }
+
+        return [$body === []
+            ? ['code' => 'empty response', 'description' => 'Moloni returned an empty response.']
+            : ['code' => 'not confirmed', 'description' => 'Moloni did not confirm the write.']];
     }
 
     /**

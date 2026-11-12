@@ -25,20 +25,19 @@ it('logs in with the password grant and caches both tokens', function () {
         ->and($store->accessToken())->toBe('access-1');
 
     Http::assertSentCount(1);
+    // Moloni reads username and password only from the query string; the client credentials go in the form body.
     Http::assertSent(fn (Request $request) => $request->method() === 'POST'
-        && $request->url() === 'https://api.moloni.pt/v1/grant/'
-        && $request['grant_type'] === 'password'
-        && $request['client_id'] === 'fake-client'
-        && $request['client_secret'] === 'fake-client-secret'
-        && $request['username'] === 'shop@example.test'
-        && $request['password'] === 'fake-password');
+        && $request->isForm()
+        && str_starts_with($request->url(), 'https://api.moloni.pt/v1/grant/?')
+        && $request->data() === ['grant_type' => 'password', 'client_id' => 'fake-client', 'client_secret' => 'fake-client-secret']
+        && grantQuery($request) === ['username' => 'shop@example.test', 'password' => 'fake-password']);
 
     // The refresh token was cached too: once the access token expires it is used instead of the password.
     travel(3600)->seconds();
 
     expect($store->accessToken())->toBe('access-2');
     Http::assertSent(fn (Request $request) => isGrantRequest($request, 'refresh_token')
-        && $request['refresh_token'] === 'refresh-1');
+        && grantQuery($request) === ['refresh_token' => 'refresh-1']);
 });
 
 it('refreshes with the refresh token when the access token expired', function () {
@@ -57,16 +56,16 @@ it('refreshes with the refresh token when the access token expired', function ()
     travel(1)->seconds();
     expect($store->accessToken())->toBe('access-2');
 
+    // Moloni reads refresh_token only from the query string; grant_type and the client credentials go in the form body.
     Http::assertSent(fn (Request $request) => isGrantRequest($request, 'refresh_token')
-        && $request['client_id'] === 'fake-client'
-        && $request['client_secret'] === 'fake-client-secret'
-        && $request['refresh_token'] === 'refresh-1');
+        && $request->data() === ['grant_type' => 'refresh_token', 'client_id' => 'fake-client', 'client_secret' => 'fake-client-secret']
+        && grantQuery($request) === ['refresh_token' => 'refresh-1']);
 
     // Both tokens rotate on refresh: the next refresh uses the new refresh token.
     travel(3600)->seconds();
     expect($store->accessToken())->toBe('access-3');
     Http::assertSent(fn (Request $request) => isGrantRequest($request, 'refresh_token')
-        && $request['refresh_token'] === 'refresh-2');
+        && grantQuery($request) === ['refresh_token' => 'refresh-2']);
     expect(Http::recorded(fn (Request $request) => isGrantRequest($request, 'password')))->toHaveCount(1);
 });
 
@@ -133,8 +132,32 @@ it('falls back to a password login once when the refresh token is rejected', fun
     expect(Http::recorded(fn (Request $request) => isGrantRequest($request, 'password')))->toHaveCount(2);
 });
 
+it('never sends a refresh token again after a failed refresh', function (array $failures, FailureType $type) {
+    $sequence = Http::sequence()->push(moloniGrant('access-1', 'refresh-1'));
+    foreach ($failures as $failure) {
+        $sequence->push(...$failure);
+    }
+    Http::fake(['*/grant/*' => $sequence->push(moloniGrant('access-2', 'refresh-2'))]);
+    $store = app(TokenStore::class);
+    $store->accessToken();
+    travel(3600)->seconds();
+
+    expect(catchMoloniException(fn () => $store->accessToken())->type)->toBe($type);
+    expect($store->accessToken())->toBe('access-2');
+
+    expect(Http::recorded(fn (Request $request) => isGrantRequest($request, 'refresh_token')))->toHaveCount(1);
+})->with([
+    // Refused refresh → fallback login is refused too → Authentication; the next call logs in.
+    'refused' => [[
+        [['error' => 'invalid_grant', 'error_description' => 'Invalid refresh token'], 400],
+        [['error' => 'invalid_grant', 'error_description' => 'Invalid username and password combination'], 400],
+    ], FailureType::Authentication],
+    // The refresh may have consumed the token server-side; the next call logs in instead of re-sending it.
+    'server error' => [[['', 503]], FailureType::Transient],
+]);
+
 it('throws Authentication when the login is refused', function () {
-    Http::fake(['*/grant/*' => Http::response(['error' => 'invalid_grant', 'error_description' => 'Invalid username and password combination'], 400)]);
+    Http::fake(['*/grant/*' => Http::response(['error' => 'invalid_grant', 'error_description' => 'Invalid username and password combination', 'error_uri' => 'https://example.test/dev/auth/'], 400)]);
 
     $e = catchMoloniException(fn () => app(TokenStore::class)->accessToken());
 
@@ -163,10 +186,11 @@ it('classifies a grant failure that is not a credential refusal as Transient', f
     $e = catchMoloniException(fn () => app(TokenStore::class)->accessToken());
 
     expect($e->type)->toBe(FailureType::Transient)
-        ->and($e->getPrevious())->toBeNull();
+        ->and($e->getPrevious())->toBeNull()
+        ->and($e->getMessage().json_encode($e->errors))->not->toContain('fake-password');
 })->with([
     'connection failure' => fn () => Http::failedConnection(),
-    'other exception' => fn () => fn () => throw new RuntimeException('boom'),
+    'other exception' => fn () => fn () => throw new RuntimeException('Failed: https://api.moloni.pt/v1/grant/?username=shop%40example.test&password=fake-password'),
     'server error' => [['', 503]],
     'too many requests' => [[['error' => 'Too Many Requests'], 429]],
     'html body' => [['<html>oops</html>', 200]],

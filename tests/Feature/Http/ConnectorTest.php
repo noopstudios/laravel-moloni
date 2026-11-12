@@ -94,7 +94,7 @@ it('retries once when the token is rejected, then throws Authentication', functi
         );
     // The retry got its new token from the cached refresh token, not from a second password login.
     Http::assertSent(fn (Request $request) => isGrantRequest($request, 'refresh_token')
-        && $request['refresh_token'] === 'refresh-1');
+        && grantQuery($request) === ['refresh_token' => 'refresh-1']);
 });
 
 it('succeeds on the retry when the new token is accepted', function () {
@@ -143,34 +143,88 @@ it('classifies an unknown endpoint as Validation', function () {
     expect(catchMoloniException(fn () => connectorWithCompany(5)->read('customers/nope'))->type)->toBe(FailureType::Validation);
 });
 
-it('classifies valid:0 as Validation with the field errors', function () {
+it('accepts valid as int 1 or string "1" as a successful write', function (int|string $valid) {
     Http::fake([
         '*/grant/*' => moloniGrant(),
-        '*/invoices/insert/*' => ['valid' => 0, 'errors' => [['code' => '2 customer_id', 'description' => 'Customer is required']]],
+        '*/documentSets/insert/*' => ['valid' => $valid, 'document_set_id' => '4321'],
     ]);
 
-    $e = catchMoloniException(fn () => connectorWithCompany(5)->write('invoices/insert', []));
+    expect(connectorWithCompany(5)->write('documentSets/insert', ['name' => 'Shop']))
+        ->toBe(['valid' => $valid, 'document_set_id' => '4321']);
+})->with([1, '1']);
+
+it('classifies a write refusal as Validation with normalised errors', function (array $body, array $errors) {
+    Http::fake([
+        '*/grant/*' => moloniGrant(),
+        '*/invoices/insert/*' => Http::response($body),
+    ]);
+
+    $e = catchMoloniException(fn () => connectorWithCompany(5)->write('invoices/insert', ['customer_id' => 1]));
 
     expect($e->type)->toBe(FailureType::Validation)
-        ->and(json_encode($e->errors))->toContain('Customer is required');
+        ->and($e->errors)->toBe($errors);
+    expect(Http::recorded(fn (Request $request) => isEndpointRequest($request, 'invoices/insert')))->toHaveCount(1);
+})->with([
+    'flat list' => [
+        [['code' => '1 products', 'description' => "Field 'products' is required"], ['code' => '1 expiration_date', 'description' => "Field 'expiration_date' is required"]],
+        [['code' => '1 products', 'description' => "Field 'products' is required"], ['code' => '1 expiration_date', 'description' => "Field 'expiration_date' is required"]],
+    ],
+    'nested list per document line' => [
+        [[['code' => '10 associated_id', 'description' => 'The associated document is not valid.'], ['code' => '2 value 0 null null 0 0', 'description' => "Field 'value' must be float"]], [['code' => '1 exemption_reason', 'description' => "Field 'exemption_reason' is required"]]],
+        [['code' => '10 associated_id', 'description' => 'The associated document is not valid.'], ['code' => '2 value 0 null null 0 0', 'description' => "Field 'value' must be float"], ['code' => '1 exemption_reason', 'description' => "Field 'exemption_reason' is required"]],
+    ],
+    'object keyed by field' => [
+        ['taxes[0]' => [['code' => '5 tax_id', 'description' => "Field 'tax_id' must be valid"]]],
+        [['code' => '5 tax_id', 'description' => "Field 'tax_id' must be valid", 'field' => 'taxes[0]']],
+    ],
+    'plain codes without human errors' => [
+        [['1 exemption_reason']],
+        [['code' => '1 exemption_reason', 'description' => '1 exemption_reason']],
+    ],
+    'valid 0 with a message' => [
+        ['valid' => 0, 'message' => [['code' => '10 associated_id', 'description' => 'The associated document is not valid.']]],
+        [['code' => '10 associated_id', 'description' => 'The associated document is not valid.']],
+    ],
+    'valid 0 with plain message codes' => [
+        ['valid' => 0, 'message' => ['1 document']],
+        [['code' => '1 document', 'description' => '1 document']],
+    ],
+    'valid 0 alone' => [
+        ['valid' => 0],
+        [['code' => 'not confirmed', 'description' => 'Moloni did not confirm the write.']],
+    ],
+    'no valid flag' => [
+        ['document_id' => 1],
+        [['code' => 'not confirmed', 'description' => 'Moloni did not confirm the write.']],
+    ],
+    'empty list' => [
+        [],
+        [['code' => 'empty response', 'description' => 'Moloni returned an empty response.']],
+    ],
+]);
+
+it('classifies an empty JSON object on a write as Validation', function () {
+    Http::fake([
+        '*/grant/*' => moloniGrant(),
+        '*/invoices/insert/*' => Http::response('{}', 200, ['Content-Type' => 'application/json']),
+    ]);
+
+    $e = catchMoloniException(fn () => connectorWithCompany(5)->write('invoices/insert', ['customer_id' => 1]));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->errors)->toBe([['code' => 'empty response', 'description' => 'Moloni returned an empty response.']]);
 });
 
-it('classifies a field error list as Validation with the field errors', function () {
+it('classifies a 400 OAuth error on a write as Validation', function () {
     Http::fake([
         '*/grant/*' => moloniGrant(),
-        '*/customers/insert/*' => Http::response([
-            ['code' => '2 vat', 'description' => 'VAT number is invalid'],
-            ['code' => '1 name', 'description' => 'Name is required'],
-        ], 400),
+        '*/invoices/insert/*' => Http::response(['error' => 'invalid_request', 'error_description' => 'Malformed request'], 400),
     ]);
 
-    $e = catchMoloniException(fn () => connectorWithCompany(5)->write('customers/insert', ['vat' => 'x']));
+    $e = catchMoloniException(fn () => connectorWithCompany(5)->write('invoices/insert', ['customer_id' => 1]));
 
     expect($e->type)->toBe(FailureType::Validation)
-        ->and($e->errors)->toBe([
-            ['code' => '2 vat', 'description' => 'VAT number is invalid'],
-            ['code' => '1 name', 'description' => 'Name is required'],
-        ]);
+        ->and($e->errors)->toBe([['code' => 'invalid_request', 'description' => 'Malformed request']]);
 });
 
 it('classifies a connection failure as Transient on read and Unknown on write', function () {
@@ -209,9 +263,8 @@ it('classifies an unexpected write response as Unknown', function (mixed $body, 
     expect(Http::recorded(fn (Request $request) => isEndpointRequest($request, 'invoices/insert')))->toHaveCount(1);
 })->with([
     'html body' => ['<html>oops</html>', 200],
-    'no valid flag' => [['document_id' => 1], 200],
-    'empty list' => [[], 200],
-    'other client error' => [['error' => 'Bad Request'], 400],
+    'html client error' => ['<html>Bad Request</html>', 400],
+    'conflict' => [['message' => 'Conflict'], 409],
     'too many requests' => [['error' => 'Too Many Requests'], 429],
 ]);
 
@@ -326,7 +379,7 @@ it('never puts credentials or tokens in the exception message', function () {
         ),
         '*/customers/insert/*' => Http::response([
             ['code' => '2 name', 'description' => 'Echoed fake-password fake-client-secret access-1 refresh-1'],
-        ], 400),
+        ]),
     ]);
     $connector = connectorWithCompany(5);
 
@@ -341,7 +394,9 @@ it('never puts credentials or tokens in the exception message', function () {
     };
 
     $assertClean(catchMoloniException(fn () => $connector->read('customers/getAll')));
-    $assertClean(catchMoloniException(fn () => $connector->write('customers/insert', ['name' => 'x'])));
+    $refusal = catchMoloniException(fn () => $connector->write('customers/insert', ['name' => 'x']));
+    $assertClean($refusal);
+    expect($refusal->errors[0]['description'] ?? null)->toBe('Echoed [redacted] [redacted] [redacted] [redacted]');
 });
 
 it('is registered as a singleton', function () {
