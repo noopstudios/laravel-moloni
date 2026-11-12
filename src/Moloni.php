@@ -31,6 +31,9 @@ class Moloni
     /**
      * An invoice due in $dueInDays days, which needs a maturity date configured for that term.
      * Returns the invoiceable's live invoice or invoice-receipt instead when there is one.
+     *
+     * On a `sync` queue connection inside the caller's transaction, the job runs after the commit
+     * and its exception surfaces then; the row stays Pending and moloni:recover picks it up.
      */
     public function invoice(Invoiceable $invoiceable, int $dueInDays = 0): InvoiceDocument
     {
@@ -40,6 +43,9 @@ class Moloni
     /**
      * An invoice-receipt paid in full by $payment. Returns the invoiceable's live invoice or
      * invoice-receipt instead when there is one.
+     *
+     * On a `sync` queue connection inside the caller's transaction, the job runs after the commit
+     * and its exception surfaces then; the row stays Pending and moloni:recover picks it up.
      */
     public function invoiceReceipt(Invoiceable $invoiceable, PaymentData $payment): InvoiceDocument
     {

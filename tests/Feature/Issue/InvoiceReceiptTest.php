@@ -544,7 +544,9 @@ it('never moves an issued document whose read-back failed out of issued when the
 
     runIssueJob($document);
 
-    expect($document->fresh()?->status)->toBe(DocumentStatus::Issued);
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and($document->fresh()?->document_id)->toBe(7001)
+        ->and($document->fresh()?->error_type)->toBe('readback_abandoned');
     Http::assertNothingSent();
 });
 
@@ -701,3 +703,123 @@ it('never issues a document in another company than the one it was requested for
     'issuing' => [DocumentStatus::Issuing, DocumentStatus::Unknown],
     'unknown' => [DocumentStatus::Unknown, DocumentStatus::Unknown],
 ]);
+
+it('leaves an issuing document that already has its Moloni id to be finished by read-back', function () {
+    fakeMoloniIssuing();
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Issuing, 'document_id' => 7001, 'attempts' => 3])->save();
+
+    (new IssueDocument($document))->failed(new RuntimeException('Worker timed out.'));
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Issuing)
+        ->and($document->fresh()?->error_type)->toBeNull();
+    Event::assertNotDispatched(DocumentFailed::class);
+
+    runIssueJob($document);
+
+    $document->refresh();
+    expect($document->status)->toBe(DocumentStatus::Issued)
+        ->and($document->document_number)->toBe('GR/8')
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+});
+
+/**
+ * Runs $during while the job resolves the customer, i.e. after the reconciliation and before the insert.
+ */
+function irDuringPayload(Closure $during): void
+{
+    app()->bind(CustomerResolver::class, fn () => new class(app(MoloniConnector::class), app(MoloniCatalog::class), app(MoloniSettings::class), $during) extends CustomerResolver
+    {
+        public function __construct(MoloniConnector $connector, MoloniCatalog $catalog, MoloniSettings $settings, private readonly Closure $during)
+        {
+            parent::__construct($connector, $catalog, $settings);
+        }
+
+        public function resolve(CustomerData $customer): ResolvedCustomer
+        {
+            ($this->during)();
+
+            return parent::resolve($customer);
+        }
+    });
+}
+
+it('never inserts when the run took longer than its time budget', function () {
+    fakeMoloniIssuing();
+    $document = irPending();
+    irDuringPayload(fn () => travelTo(now()->addSeconds(111)));
+
+    runIssueJob($document);
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Issuing)
+        ->and($document->fresh()?->document_id)->toBeNull()
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+    Event::assertNotDispatched(DocumentFailed::class);
+});
+
+it('inserts when the run stayed within its time budget', function () {
+    fakeMoloniIssuing();
+    $document = irPending();
+    irDuringPayload(fn () => travelTo(now()->addSeconds(100)));
+
+    runIssueJob($document);
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(1);
+});
+
+it('never inserts when the run no longer owns the document lock', function () {
+    fakeMoloniIssuing();
+    $document = irPending();
+    $thief = Cache::lock("moloni-doc-{$document->id}", 150);
+    irDuringPayload(function () use ($document, $thief) {
+        Cache::lock("moloni-doc-{$document->id}")->forceRelease();
+        $thief->get();
+    });
+
+    runIssueJob($document);
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Issuing)
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0)
+        // The job's release left the other run's lock in place.
+        ->and(Cache::lock("moloni-doc-{$document->id}", 150)->get())->toBeFalse();
+    $thief->release();
+});
+
+it('abandons the read-back repair when the document cannot be read back for good', function (mixed $readBack) {
+    fakeMoloniIssuing(['*/documents/getOne/*' => $readBack]);
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Issued, 'document_id' => 7001, 'issued_at' => now(), 'error_type' => 'readback_failed', 'attempts' => 1])->save();
+
+    runIssueJob($document);
+
+    $document->refresh();
+    expect($document->status)->toBe(DocumentStatus::Issued)
+        ->and($document->document_id)->toBe(7001)
+        ->and($document->error_type)->toBe('readback_abandoned')
+        ->and($document->attempts)->toBe(2)
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+    Event::assertNotDispatched(DocumentIssued::class);
+})->with([
+    'another document' => [fn () => moloniDocumentRow(['document_id' => 1])],
+    'not found' => [fn () => Http::response([])],
+]);
+
+it('keeps repairing a transient read-back failure only up to the attempts cap', function () {
+    fakeMoloniIssuing(['*/documents/getOne/*' => Http::response('Unavailable', 503)]);
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Issued, 'document_id' => 7001, 'issued_at' => now(), 'error_type' => 'readback_failed', 'attempts' => 8])->save();
+
+    runIssueJob($document);
+
+    expect($document->fresh()?->error_type)->toBe('readback_failed')
+        ->and($document->fresh()?->attempts)->toBe(9);
+
+    runIssueJob($document);
+
+    $document->refresh();
+    expect($document->status)->toBe(DocumentStatus::Issued)
+        ->and($document->error_type)->toBe('readback_abandoned')
+        ->and($document->attempts)->toBe(10)
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+});

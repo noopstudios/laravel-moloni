@@ -73,6 +73,7 @@ it('recover re-dispatches issued documents whose read-back failed, and no other 
     travelTo(now()->subMinutes(6));
     $repair = InvoiceDocument::factory()->invoiceReceipt()->issued()->create(['error_type' => 'readback_failed']);
     InvoiceDocument::factory()->invoiceReceipt()->issued()->create(['error_type' => 'total_mismatch']);
+    InvoiceDocument::factory()->invoiceReceipt()->issued()->create(['error_type' => 'readback_abandoned']);
     InvoiceDocument::factory()->invoiceReceipt()->create(['status' => DocumentStatus::Issued, 'error_type' => 'readback_failed']);
     travelTo(now()->addMinutes(6));
 

@@ -4,6 +4,7 @@ namespace Noop\Moloni\Jobs;
 
 use Carbon\CarbonImmutable;
 use Illuminate\Bus\Queueable;
+use Illuminate\Cache\Lock as CacheLock;
 use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -53,6 +54,9 @@ use Throwable;
  *   handed to a second worker;
  * - the cache store must support atomic locks and be shared by every worker (not `array`, not a
  *   per-server `file` store): the per-document lock is what keeps two runs apart;
+ * - the worker must enforce the job timeout (the pcntl extension loaded, `--timeout` honoured), or a
+ *   run can outlive its lock; as a last guard a run never sends the insert once it no longer owns
+ *   the lock or has run for more than MAX_RUN_SECONDS (the row stays Issuing and is reconciled);
  * - DocumentIssued and DocumentFailed are dispatched at most once per outcome; a crash right after
  *   the state is saved loses the event, never the state.
  */
@@ -67,6 +71,15 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
     public const COMPANY_CHANGED = 'company_changed';
 
     public const JOB_FAILED = 'job_failed';
+
+    /** Issued, but its read-back failed for good or too often: no longer repaired automatically. */
+    public const READBACK_ABANDONED = 'readback_abandoned';
+
+    /** The runs (counted in `attempts`) after which a failing read-back is no longer repaired. */
+    public const MAX_READBACK_ATTEMPTS = 10;
+
+    /** Past this, a run never sends the insert: the lock (LOCK_SECONDS) must outlive the insert call. */
+    public const MAX_RUN_SECONDS = 110;
 
     /** Longer than the timeout: a run never outlives its lock. */
     public const LOCK_SECONDS = 150;
@@ -114,6 +127,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         ProductResolver $products,
         MoloniSettings $settings,
     ): void {
+        $startedAt = now()->toImmutable();
         $lock = self::lockFor($this->document);
 
         // Another run holds the document: it is working on it, and moloni:recover is the safety
@@ -126,7 +140,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             $document = $this->document->fresh();
 
             if ($document !== null) {
-                $this->issue($document, $client, $reconcile, $customers, $taxes, $products, $settings);
+                $this->issue($document, $client, $reconcile, $customers, $taxes, $products, $settings, $lock, $startedAt);
             }
         } finally {
             $lock->release();
@@ -136,7 +150,8 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
     /**
      * Called by the queue when the job gives up (an exception on its last try, a timeout). It
      * skips a document another run holds. A Pending row with retries left stays for
-     * moloni:recover; an Issuing one may exist in Moloni, so it becomes Unknown, never Failed.
+     * moloni:recover; an Issuing one may exist in Moloni, so it becomes Unknown, never Failed,
+     * unless its Moloni id is already saved: it exists, and moloni:recover finishes it by read-back.
      */
     public function failed(?Throwable $e): void
     {
@@ -156,7 +171,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             $message = $e instanceof MoloniException ? $this->message($e) : $this->jobFailedMessage($e);
             $errorType = $e instanceof MoloniException ? $e->type->value : self::JOB_FAILED;
 
-            if ($document->status === DocumentStatus::Issuing) {
+            if ($document->status === DocumentStatus::Issuing && $document->document_id === null) {
                 $this->settle($document, DocumentStatus::Unknown, $errorType, $message);
             } elseif ($document->status === DocumentStatus::Pending && $document->attempts >= $this->tries) {
                 $this->settle($document, DocumentStatus::Failed, $errorType, $message);
@@ -174,12 +189,12 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         TaxResolver $taxes,
         ProductResolver $products,
         MoloniSettings $settings,
+        Lock $lock,
+        CarbonImmutable $startedAt,
     ): void {
         if ($this->needsReadBack($document)) {
             // Issued, but its number and total were never read: only read, never insert.
-            if ($settings->companyIdOrNull() === $document->company_id) {
-                $this->finish($document, $client, announce: false);
-            }
+            $this->repairReadBack($document, $client, $settings);
 
             return;
         }
@@ -238,6 +253,12 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             return;
         }
 
+        if (! $this->stillHolds($lock, $startedAt)) {
+            // The lock may already belong to another run. The row stays Issuing with no id, so the
+            // next run reconciles before anything is sent.
+            return;
+        }
+
         try {
             $documentId = $client->insert($document->type, $payload);
         } catch (MoloniException $e) {
@@ -259,6 +280,45 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         $document->save();
 
         $this->finish($document, $client);
+    }
+
+    /**
+     * Whether this run still owns the document's lock with time to spare for the insert. A lock
+     * that cannot say who owns it counts as lost.
+     */
+    private function stillHolds(Lock $lock, CarbonImmutable $startedAt): bool
+    {
+        return $lock instanceof CacheLock
+            && $lock->isOwnedByCurrentProcess()
+            && $startedAt->diffInSeconds(now()) <= self::MAX_RUN_SECONDS;
+    }
+
+    /**
+     * Reads back an issued document whose read-back failed. A permanent failure (the document
+     * cannot be read, the company changed) or too many attempts abandon the repair: the row stays
+     * Issued with its Moloni id, and moloni:recover no longer dispatches it.
+     */
+    private function repairReadBack(InvoiceDocument $document, MoloniClient $client, MoloniSettings $settings): void
+    {
+        if ($settings->companyIdOrNull() !== $document->company_id) {
+            $document->fill([
+                'error_type' => self::READBACK_ABANDONED,
+                'error_message' => Message::get('The document was requested for Moloni company :company, which is no longer the configured company.', ['company' => (string) $document->company_id]),
+            ])->save();
+
+            return;
+        }
+
+        $document->attempts++;
+        $document->save();
+
+        $error = $this->finish($document, $client, announce: false);
+        $permanent = $error instanceof MoloniException && $error->type === FailureType::Validation;
+
+        if ($error !== null && ($permanent || $document->attempts >= self::MAX_READBACK_ATTEMPTS)) {
+            $document->error_type = self::READBACK_ABANDONED;
+            $document->save();
+        }
     }
 
     private function needsReadBack(InvoiceDocument $document): bool
@@ -398,12 +458,14 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
     /**
      * Reads the inserted document back for its number and total. The document is issued whatever
-     * the read-back says; a total that differs from the expected one is flagged.
+     * the read-back says; a total that differs from the expected one is flagged. Returns the error
+     * that failed the read-back, if any.
      */
-    private function finish(InvoiceDocument $document, MoloniClient $client, bool $announce = true): void
+    private function finish(InvoiceDocument $document, MoloniClient $client, bool $announce = true): ?Throwable
     {
         $errorType = null;
         $errorMessage = null;
+        $error = null;
 
         try {
             $row = $client->document((int) $document->document_id);
@@ -418,6 +480,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
                 ]);
             }
         } catch (Throwable $e) {
+            $error = $e;
             $errorType = self::READBACK_FAILED;
             $errorMessage = $e instanceof MoloniException
                 ? $this->message($e)
@@ -434,6 +497,8 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         if ($announce) {
             Event::dispatch(new DocumentIssued($document));
         }
+
+        return $error;
     }
 
     /**
