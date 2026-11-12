@@ -2,6 +2,7 @@
 
 namespace Noop\Moloni\Tests\Fixtures;
 
+use Closure;
 use Illuminate\Database\Eloquent\Model;
 use Noop\Moloni\Contracts\Invoiceable;
 use Noop\Moloni\Data\CustomerData;
@@ -20,8 +21,15 @@ class Order extends Model implements Invoiceable
 
     protected $fillable = ['customer_vat'];
 
+    /** @var (Closure(self): InvoiceData)|null Replaces the invoice data below; reset it in beforeEach(). */
+    public static ?Closure $invoiceDataUsing = null;
+
     public function toInvoiceData(): InvoiceData
     {
+        if (self::$invoiceDataUsing !== null) {
+            return (self::$invoiceDataUsing)($this);
+        }
+
         return new InvoiceData(
             new CustomerData('C'.$this->id, $this->customer_vat, 'Acme Lda', null, null, null, null),
             [new InvoiceLine('Consulting', 1, '100', 23)],

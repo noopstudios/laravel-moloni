@@ -29,5 +29,16 @@
     "Failed": "Falhado",
     "Awaiting confirmation": "Por confirmar",
     "Superseded": "Substituído",
-    "Voided": "Anulado"
+    "Voided": "Anulado",
+    "The document :reference has no invoiceable to reissue it from.": "O documento :reference não tem origem a partir da qual possa ser reemitido.",
+    "Another live document already exists for :reference.": "Já existe outro documento ativo para :reference.",
+    "Only a failed document can be retried.": "Só é possível repetir um documento falhado.",
+    "The document :reference has not been issued in Moloni.": "O documento :reference não foi emitido no Moloni.",
+    "Cannot issue in :currency: currency not supported yet.": "Não é possível emitir em :currency: moeda ainda não suportada.",
+    "The payment method :method is not configured.": "O método de pagamento :method não está configurado.",
+    "The payment of :paid does not match the document total of :total.": "O pagamento de :paid não corresponde ao total do documento, de :total.",
+    "No maturity date is configured for :days days.": "Não está configurado nenhum prazo de vencimento de :days dias.",
+    "Only an issued or unconfirmed invoice or invoice-receipt can be reissued.": "Só é possível reemitir uma fatura ou fatura-recibo emitida ou por confirmar.",
+    "The document total changes with Moloni's tax rates: line tax rates must match Moloni's rates exactly.": "O total do documento muda com as taxas de IVA do Moloni: as taxas das linhas têm de coincidir exatamente com as do Moloni.",
+    "Dispatched :count Moloni documents again.": "Foram reenviados :count documentos do Moloni."
 }

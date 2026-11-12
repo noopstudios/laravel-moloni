@@ -2,8 +2,10 @@
 
 namespace Noop\Moloni;
 
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\ServiceProvider;
 use Noop\Moloni\Console\CheckCommand;
+use Noop\Moloni\Console\RecoverCommand;
 use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Http\TokenStore;
 use Noop\Moloni\Resolvers\ProductResolver;
@@ -22,6 +24,7 @@ class MoloniServiceProvider extends ServiceProvider
             fn () => $app->make(MoloniSettings::class)->companyIdOrNull(),
         ));
         $this->app->scoped(ProductResolver::class);
+        $this->app->singleton(Moloni::class);
     }
 
     public function boot(): void
@@ -33,8 +36,12 @@ class MoloniServiceProvider extends ServiceProvider
         $this->loadJsonTranslationsFrom(__DIR__.'/../resources/lang');
 
         if ($this->app->runningInConsole()) {
-            $this->commands([CheckCommand::class]);
+            $this->commands([CheckCommand::class, RecoverCommand::class]);
         }
+
+        $this->callAfterResolving(Schedule::class, function (Schedule $schedule) {
+            $schedule->command('moloni:recover')->everyFiveMinutes()->withoutOverlapping();
+        });
 
         $this->publishes([
             __DIR__.'/../config/moloni.php' => config_path('moloni.php'),

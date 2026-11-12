@@ -1,0 +1,25 @@
+<?php
+
+namespace Noop\Moloni\Facades;
+
+use Illuminate\Support\Facades\Facade;
+use Noop\Moloni\Contracts\Invoiceable;
+use Noop\Moloni\Data\PaymentData;
+use Noop\Moloni\Models\InvoiceDocument;
+
+/**
+ * @method static InvoiceDocument invoice(Invoiceable $invoiceable, int $dueInDays = 0)
+ * @method static InvoiceDocument invoiceReceipt(Invoiceable $invoiceable, PaymentData $payment)
+ * @method static InvoiceDocument reissue(InvoiceDocument $document, ?PaymentData $payment = null, ?int $dueInDays = null)
+ * @method static void retry(InvoiceDocument $document)
+ * @method static string pdfLink(InvoiceDocument $document)
+ *
+ * @see \Noop\Moloni\Moloni
+ */
+class Moloni extends Facade
+{
+    protected static function getFacadeAccessor(): string
+    {
+        return \Noop\Moloni\Moloni::class;
+    }
+}
