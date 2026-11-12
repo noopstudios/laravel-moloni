@@ -9,11 +9,11 @@ class CheckCommand extends Command
 {
     protected $signature = 'moloni:check';
 
-    protected $description = 'Check the Moloni login and that every configured id exists in Moloni';
+    protected $description = 'Check the Moloni login, the required settings and that every configured id exists in Moloni';
 
     public function handle(SettingsCheck $check): int
     {
-        $problems = $check->problems();
+        $problems = $check->readiness();
 
         if ($problems === []) {
             $this->components->info(__('The Moloni settings are valid.'));

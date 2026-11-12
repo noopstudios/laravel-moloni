@@ -57,6 +57,26 @@ it('lets an explicit company id win and omits it when there is none', function (
         && ! array_key_exists('company_id', $request->data()));
 });
 
+it('sends no company id when the caller passes an explicit null, also on the token retry', function () {
+    $resolved = 0;
+    $connector = new MoloniConnector(app(TokenStore::class), function () use (&$resolved) {
+        $resolved++;
+
+        return 5;
+    });
+    Http::fake([
+        '*/grant/*' => Http::sequence()->push(moloniGrant('access-1', 'refresh-1'))->push(moloniGrant('access-2', 'refresh-2')),
+        '*/countries/getAll/*' => Http::sequence()->push('', 401)->push([]),
+    ]);
+
+    $connector->read('countries/getAll', ['company_id' => null, 'qty' => 50]);
+
+    expect($resolved)->toBe(0);
+    Http::assertSentCount(4);
+    Http::assertNotSent(fn (Request $request) => isEndpointRequest($request, 'countries/getAll')
+        && array_key_exists('company_id', $request->data()));
+});
+
 it('returns an empty list from a read as a normal result', function () {
     Http::fake([
         '*/grant/*' => moloniGrant(),

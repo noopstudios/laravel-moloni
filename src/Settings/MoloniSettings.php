@@ -2,7 +2,7 @@
 
 namespace Noop\Moloni\Settings;
 
-use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Schema;
 use Spatie\LaravelSettings\Exceptions\MissingSettings;
 use Spatie\LaravelSettings\Settings;
 
@@ -44,13 +44,27 @@ class MoloniSettings extends Settings
      */
     public function companyIdOrNull(): ?int
     {
+        // Checked up front: a failed query would abort an open PostgreSQL transaction.
+        if (! self::settingsTableExists()) {
+            return null;
+        }
+
         try {
             // Loading goes through a method call; a plain property read hides the throw from static analysis.
             $companyId = $this->toArray()['company_id'] ?? null;
-        } catch (MissingSettings|QueryException) {
+        } catch (MissingSettings) {
             return null;
         }
 
         return is_int($companyId) ? $companyId : null;
+    }
+
+    private static function settingsTableExists(): bool
+    {
+        $connection = config('settings.repositories.database.connection');
+        $table = config('settings.repositories.database.table');
+
+        return Schema::connection(is_string($connection) ? $connection : null)
+            ->hasTable(is_string($table) ? $table : 'settings');
     }
 }

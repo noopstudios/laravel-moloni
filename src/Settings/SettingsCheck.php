@@ -12,6 +12,9 @@ use Noop\Moloni\Http\TokenStore;
 /**
  * Verifies that the login works and that every id in the settings exists in Moloni.
  * Shared by the moloni:check command and the settings page.
+ *
+ * Both checks flush the catalog cache and make about ten Moloni requests, so run them
+ * only on an explicit action (the command, a save or "check" button), never on page render.
  */
 class SettingsCheck
 {
@@ -26,6 +29,11 @@ class SettingsCheck
     ) {}
 
     /**
+     * Problems with what is configured: the login, the company and every configured id must exist
+     * in Moloni, and every value must be well formed. Settings left empty are not problems here.
+     *
+     * Flushes the catalog cache and makes about ten Moloni requests: for explicit actions only.
+     *
      * @return list<string> One translated message per problem; empty when everything checks out.
      */
     public function problems(): array
@@ -34,58 +42,67 @@ class SettingsCheck
         // Check against what Moloni has now, not what was cached before the settings changed.
         $this->catalog->flush();
 
+        // Null too while the settings do not exist yet; the other settings are only read after this.
+        $companyId = $this->settings->companyIdOrNull();
+
+        if ($companyId !== null && ! in_array($this->settings->vies_unavailable, ['charge', 'block'], true)) {
+            $this->problems[] = __('The vies_unavailable setting must be "charge" or "block".');
+        }
+
         try {
             $this->tokens->accessToken();
         } catch (MoloniException $e) {
-            return [__('Could not log in to Moloni: :reason', ['reason' => $e->getMessage()])];
-        }
+            $this->problems[] = __('Could not log in to Moloni: :reason', ['reason' => $e->getMessage()]);
 
-        $companyId = $this->settings->companyIdOrNull();
-        if ($companyId === null) {
-            return [__('No Moloni company is configured.')];
-        }
-
-        $companyExists = $this->exists(fn () => $this->catalog->companies(), 'company_id', $companyId);
-        if ($companyExists === false) {
-            return [__('The company :id does not exist in Moloni or this account cannot access it.', ['id' => $companyId])];
-        }
-        if ($companyExists === null) {
             return $this->problems;
         }
 
-        foreach ($this->settings->document_sets as $type => $id) {
-            $this->expect($this->catalog->documentSets(...), 'document_set_id', $id,
-                __('The :type document set :id does not exist in Moloni.', ['type' => $type, 'id' => $id]));
+        if ($companyId === null) {
+            $this->problems[] = __('No Moloni company is configured.');
+
+            return $this->problems;
         }
 
-        foreach ($this->settings->payment_methods as $key => $id) {
-            $this->expect($this->catalog->paymentMethods(...), 'payment_method_id', $id,
-                __('The :key payment method :id does not exist in Moloni.', ['key' => $key, 'id' => $id]));
+        $companyExists = $this->exists($this->catalog->companies(...), $this->field('company_id', $companyId));
+        if ($companyExists === false) {
+            $this->problems[] = __('The company :id does not exist in Moloni or this account cannot access it.', ['id' => $companyId]);
+        }
+        if ($companyExists !== true) {
+            return $this->problems;
         }
 
-        foreach ($this->settings->maturity_dates as $days => $id) {
-            $this->expect($this->catalog->maturityDates(...), 'maturity_date_id', $id,
-                __('The :days-day maturity date :id does not exist in Moloni.', ['days' => $days, 'id' => $id]));
+        foreach ($this->settings->document_sets as $type => $value) {
+            $this->expectId('document_sets', $type, $value, $this->catalog->documentSets(...), 'document_set_id',
+                fn (int $id) => __('The :type document set :id does not exist in Moloni.', ['type' => $type, 'id' => $id]));
+        }
+
+        foreach ($this->settings->payment_methods as $key => $value) {
+            $this->expectId('payment_methods', $key, $value, $this->catalog->paymentMethods(...), 'payment_method_id',
+                fn (int $id) => __('The :key payment method :id does not exist in Moloni.', ['key' => $key, 'id' => $id]));
+        }
+
+        foreach ($this->settings->maturity_dates as $days => $value) {
+            $this->expectId('maturity_dates', $days, $value, $this->catalog->maturityDates(...), 'maturity_date_id',
+                fn (int $id) => __('The :days-day maturity date :id does not exist in Moloni.', ['days' => $days, 'id' => $id]));
         }
 
         if ($this->settings->default_category_id !== null) {
-            $this->expect($this->catalog->productCategories(...), 'category_id', $this->settings->default_category_id,
-                __('The default product category :id does not exist in Moloni.', ['id' => $this->settings->default_category_id]));
+            $this->expectId('default_category_id', 'default_category_id', $this->settings->default_category_id, $this->catalog->productCategories(...), 'category_id',
+                fn (int $id) => __('The default category :id is not a top-level product category in Moloni.', ['id' => $id]));
         }
 
         if ($this->settings->default_unit_id !== null) {
-            $this->expect($this->catalog->measurementUnits(...), 'unit_id', $this->settings->default_unit_id,
-                __('The default measurement unit :id does not exist in Moloni.', ['id' => $this->settings->default_unit_id]));
+            $this->expectId('default_unit_id', 'default_unit_id', $this->settings->default_unit_id, $this->catalog->measurementUnits(...), 'unit_id',
+                fn (int $id) => __('The default measurement unit :id does not exist in Moloni.', ['id' => $id]));
         }
 
-        foreach ($this->settings->tax_overrides as $percentage => $id) {
-            $this->expect($this->catalog->taxes(...), 'tax_id', $id,
-                __('The tax :id configured for :percentage% does not exist in Moloni.', ['id' => $id, 'percentage' => $percentage]));
+        foreach ($this->settings->tax_overrides as $percentage => $value) {
+            $this->expectId('tax_overrides', $percentage, $value, $this->catalog->taxes(...), 'tax_id',
+                fn (int $id) => __('The tax :id configured for :percentage% does not exist in Moloni.', ['id' => $id, 'percentage' => $percentage]));
         }
 
         foreach ($this->settings->exemption_reasons as $case => $code) {
-            $this->expect($this->catalog->taxExemptions(...), 'code', $code,
-                __('The exemption reason :code configured for :case does not exist in Moloni.', ['code' => $code, 'case' => $case]));
+            $this->expectExemption($case, $code);
         }
 
         if ($this->settings->default_product_id !== null) {
@@ -96,20 +113,104 @@ class SettingsCheck
     }
 
     /**
-     * @param  Closure(): Collection<int, array<string, mixed>>  $list
+     * Everything problems() reports, plus the settings that issuing documents cannot do without.
+     *
+     * Flushes the catalog cache and makes about ten Moloni requests: for explicit actions only.
+     *
+     * @return list<string>
      */
-    private function expect(Closure $list, string $field, int|string $id, string $problem): void
+    public function readiness(): array
     {
-        if ($this->exists($list, $field, $id) === false) {
-            $this->problems[] = $problem;
+        $problems = $this->problems();
+
+        if ($this->settings->companyIdOrNull() === null) {
+            // The rest cannot be read before the settings exist, and means little without a company.
+            return array_values(array_unique([...$problems, __('No Moloni company is configured.')]));
         }
+
+        foreach (['invoice_receipt', 'invoice'] as $type) {
+            if (! isset($this->settings->document_sets[$type])) {
+                $problems[] = __('No document set is configured for :type.', ['type' => $type]);
+            }
+        }
+
+        if ($this->settings->payment_methods === []) {
+            $problems[] = __('No payment method is configured.');
+        }
+
+        if (! isset($this->settings->maturity_dates[0])) {
+            $problems[] = __('No maturity date is configured for 0 days.');
+        }
+
+        return array_values(array_unique($problems));
     }
 
     /**
      * @param  Closure(): Collection<int, array<string, mixed>>  $list
+     * @param  Closure(int): string  $missing
+     */
+    private function expectId(string $setting, int|string $key, mixed $value, Closure $list, string $field, Closure $missing): void
+    {
+        $id = $this->validId($value);
+
+        if ($id === null) {
+            $this->problems[] = $this->invalidValue($setting, $key);
+
+            return;
+        }
+
+        if ($this->exists($list, $this->field($field, $id)) === false) {
+            $this->problems[] = $missing($id);
+        }
+    }
+
+    /**
+     * Exemptions are matched on the AT code, which is what invoice lines carry;
+     * Moloni's own code differs from it for some entries.
+     */
+    private function expectExemption(int|string $case, mixed $code): void
+    {
+        if (! is_string($code) || $code === '') {
+            $this->problems[] = $this->invalidValue('exemption_reasons', $case);
+
+            return;
+        }
+
+        $matches = fn (array $row) => (string) ($row['at_code'] ?? $row['code'] ?? '') === $code;
+
+        if ($this->exists($this->catalog->taxExemptions(...), $matches) === false) {
+            $this->problems[] = __('The exemption reason :code configured for :case does not exist in Moloni.', ['code' => $code, 'case' => $case]);
+        }
+    }
+
+    private function invalidValue(string $setting, int|string $key): string
+    {
+        return __('The :setting setting has an invalid value for :key.', ['setting' => $setting, 'key' => $key]);
+    }
+
+    private function validId(mixed $value): ?int
+    {
+        if (is_string($value) && ctype_digit($value)) {
+            $value = (int) $value;
+        }
+
+        return is_int($value) && $value > 0 ? $value : null;
+    }
+
+    /**
+     * @return Closure(array<string, mixed>): bool
+     */
+    private function field(string $field, int $id): Closure
+    {
+        return fn (array $row) => is_numeric($row[$field] ?? null) && (int) $row[$field] === $id;
+    }
+
+    /**
+     * @param  Closure(): Collection<int, array<string, mixed>>  $list
+     * @param  Closure(array<string, mixed>): bool  $matches
      * @return bool|null Null when the list could not be read; that is recorded as a problem once.
      */
-    private function exists(Closure $list, string $field, int|string $id): ?bool
+    private function exists(Closure $list, Closure $matches): ?bool
     {
         try {
             $rows = $list();
@@ -122,7 +223,7 @@ class SettingsCheck
             return null;
         }
 
-        return $rows->contains(fn (array $row) => isset($row[$field]) && (string) $row[$field] === (string) $id);
+        return $rows->contains($matches);
     }
 
     /**

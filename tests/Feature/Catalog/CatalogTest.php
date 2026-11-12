@@ -42,7 +42,7 @@ it('caches a catalog list for a day and flush clears it', function () {
     expect(catalogRequestsTo('paymentMethods/getAll'))->toBe(3);
 });
 
-it('reads each list from its endpoint, sending the company id only to company lists', function (string $method, string $endpoint, bool $companyScoped) {
+it('sends the company id to company lists and never to global lists', function (string $method, string $endpoint, bool $companyScoped) {
     useMoloniSettings(['company_id' => 5]);
     Http::fake([
         '*/grant/*' => moloniGrant(),
@@ -52,7 +52,9 @@ it('reads each list from its endpoint, sending the company id only to company li
     expect(app(MoloniCatalog::class)->{$method}()->all())->toBe([['id' => 1]]);
 
     Http::assertSent(fn (Request $request) => str_contains($request->url(), "/{$endpoint}/")
-        && (! $companyScoped || $request['company_id'] === 5));
+        && ($companyScoped
+            ? $request['company_id'] === 5
+            : ! array_key_exists('company_id', $request->data())));
 })->with([
     ['companies', 'companies/getAll', false],
     ['documentSets', 'documentSets/getAll', true],

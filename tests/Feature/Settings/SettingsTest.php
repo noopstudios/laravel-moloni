@@ -1,11 +1,13 @@
 <?php
 
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Settings\MoloniSettings;
+use Spatie\LaravelSettings\SettingsRepositories\DatabaseSettingsRepository;
 
 it('creates the moloni settings with their defaults when migrating', function () {
     $settings = app(MoloniSettings::class);
@@ -62,6 +64,20 @@ it('resolves no company id when the settings table does not exist', function () 
     app()->forgetScopedInstances();
 
     expect(app(MoloniSettings::class)->companyIdOrNull())->toBeNull();
+});
+
+it('lets any other database error reach the caller', function () {
+    app()->bind(DatabaseSettingsRepository::class, fn () => new class(['table' => 'settings']) extends DatabaseSettingsRepository
+    {
+        /** @return array<string, mixed> */
+        public function getPropertiesInGroup(string $group): array
+        {
+            throw new QueryException('testing', 'select * from settings', [], new PDOException('Connection lost'));
+        }
+    });
+    app()->forgetScopedInstances();
+
+    expect(fn () => app(MoloniSettings::class)->companyIdOrNull())->toThrow(QueryException::class);
 });
 
 it('omits the company id from requests when the settings table does not exist', function () {

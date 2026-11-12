@@ -30,7 +30,7 @@ class MoloniConnector
      */
     public function read(string $endpoint, array $params = []): array
     {
-        return $this->send($endpoint, $params, isWrite: false);
+        return $this->send($endpoint, $this->withCompany($params), isWrite: false);
     }
 
     /**
@@ -39,7 +39,7 @@ class MoloniConnector
      */
     public function write(string $endpoint, array $params): array
     {
-        return $this->send($endpoint, $params, isWrite: true);
+        return $this->send($endpoint, $this->withCompany($params), isWrite: true);
     }
 
     /**
@@ -75,16 +75,33 @@ class MoloniConnector
     }
 
     /**
+     * Adds the configured company unless the caller set company_id itself.
+     * An explicit null means "send no company_id" (global endpoints such as countries/getAll).
+     *
+     * @param  array<string, mixed>  $params
+     * @return array<string, mixed>
+     */
+    private function withCompany(array $params): array
+    {
+        if (array_key_exists('company_id', $params)) {
+            if ($params['company_id'] === null) {
+                unset($params['company_id']);
+            }
+
+            return $params;
+        }
+
+        $companyId = $this->companyId !== null ? ($this->companyId)() : null;
+
+        return $companyId !== null ? [...$params, 'company_id' => $companyId] : $params;
+    }
+
+    /**
      * @param  array<string, mixed>  $params
      * @return array<array-key, mixed>
      */
     private function send(string $endpoint, array $params, bool $isWrite, bool $isRetry = false): array
     {
-        $companyId = $this->companyId !== null ? ($this->companyId)() : null;
-        if ($companyId !== null) {
-            $params += ['company_id' => $companyId];
-        }
-
         $token = $this->tokens->accessToken();
         // Unknown on a write: the request may have reached Moloni and been applied.
         $uncertain = $isWrite ? FailureType::Unknown : FailureType::Transient;

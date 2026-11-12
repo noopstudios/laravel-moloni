@@ -3,9 +3,11 @@
 use Illuminate\Http\Client\Request;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Tests\DiscoveryOrderTestCase;
 use Noop\Moloni\Tests\TestCase;
 use PHPUnit\Framework\Assert;
 
+pest()->extend(DiscoveryOrderTestCase::class)->in('DiscoveryOrder');
 pest()->extend(TestCase::class)->in('Feature', 'Unit');
 
 function useFakeMoloniCredentials(): void

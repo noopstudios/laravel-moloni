@@ -6,10 +6,15 @@
     "The :type document set :id does not exist in Moloni.": "A série de documentos :id para :type não existe no Moloni.",
     "The :key payment method :id does not exist in Moloni.": "O método de pagamento :id para :key não existe no Moloni.",
     "The :days-day maturity date :id does not exist in Moloni.": "O prazo de vencimento :id de :days dias não existe no Moloni.",
-    "The default product category :id does not exist in Moloni.": "A categoria de artigos predefinida :id não existe no Moloni.",
     "The default measurement unit :id does not exist in Moloni.": "A unidade de medida predefinida :id não existe no Moloni.",
     "The tax :id configured for :percentage% does not exist in Moloni.": "A taxa de IVA :id configurada para :percentage% não existe no Moloni.",
     "The exemption reason :code configured for :case does not exist in Moloni.": "O motivo de isenção :code configurado para :case não existe no Moloni.",
     "The default product :id does not exist in Moloni.": "O artigo predefinido :id não existe no Moloni.",
-    "The Moloni settings are valid.": "As definições do Moloni são válidas."
+    "The Moloni settings are valid.": "As definições do Moloni são válidas.",
+    "The default category :id is not a top-level product category in Moloni.": "A categoria predefinida :id não é uma categoria de artigos de primeiro nível no Moloni.",
+    "The vies_unavailable setting must be \"charge\" or \"block\".": "A definição vies_unavailable tem de ser \"charge\" ou \"block\".",
+    "The :setting setting has an invalid value for :key.": "A definição :setting tem um valor inválido para :key.",
+    "No document set is configured for :type.": "Não está configurada nenhuma série de documentos para :type.",
+    "No payment method is configured.": "Não está configurado nenhum método de pagamento.",
+    "No maturity date is configured for 0 days.": "Não está configurado nenhum prazo de vencimento de 0 dias."
 }

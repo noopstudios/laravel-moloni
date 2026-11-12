@@ -126,7 +126,8 @@ class MoloniCatalog
     /** @return Collection<int, array<string, mixed>> */
     private function global(string $endpoint): Collection
     {
-        return $this->remember($endpoint, $endpoint, []);
+        // An explicit null keeps the connector from adding the configured company.
+        return $this->remember($endpoint, $endpoint, ['company_id' => null]);
     }
 
     /**
