@@ -11,6 +11,9 @@ use InvalidArgumentException;
  */
 final readonly class InvoiceLine
 {
+    /** Two VAT rates closer than this are the same rate; a rate below it is zero. */
+    public const RATE_TOLERANCE = 0.001;
+
     /**
      * @param  string  $unitNetPrice  Unit price without VAT, with at most 5 decimals (what Moloni stores).
      * @param  float  $taxRate  VAT percentage, e.g. 23; 0 requires an exemption reason.
@@ -54,13 +57,28 @@ final readonly class InvoiceLine
     }
 
     /**
-     * The rounded line base × rate, rounded half up to cents: Moloni rounds tax per line.
+     * quantity × unit price × rate, rounded half up to cents: Moloni taxes each line on its
+     * unrounded base and rounds the tax per line.
      */
     public function lineTaxCents(): int
     {
-        $base = BigDecimal::ofUnscaledValue($this->lineNetCents(), 2);
+        if ($this->isZeroRated()) {
+            return 0;
+        }
+
+        $base = self::decimal($this->quantity)->multipliedBy($this->unitNetPrice);
 
         return $this->toCents($base->multipliedBy(self::decimal($this->taxRate))->dividedByExact(100));
+    }
+
+    public function isZeroRated(): bool
+    {
+        return self::isZeroRate($this->taxRate);
+    }
+
+    public static function isZeroRate(float $rate): bool
+    {
+        return abs($rate) < self::RATE_TOLERANCE;
     }
 
     private function toCents(BigDecimal $amount): int

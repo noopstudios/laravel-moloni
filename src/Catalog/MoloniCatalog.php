@@ -118,6 +118,21 @@ class MoloniCatalog
         return (int) $language['language_id'];
     }
 
+    /**
+     * Whether the code is a Moloni exemption reason. Matched on the AT code, which is what invoice
+     * lines carry (Moloni's own code differs from it for some entries), or on Moloni's code when
+     * the AT code is missing or empty.
+     */
+    public function hasExemption(string $code): bool
+    {
+        return $code !== '' && $this->taxExemptions()->contains(function (array $row) use ($code) {
+            $atCode = $row['at_code'] ?? null;
+            $rowCode = is_string($atCode) && $atCode !== '' ? $atCode : ($row['code'] ?? null);
+
+            return is_scalar($rowCode) && (string) $rowCode === $code;
+        });
+    }
+
     public function flush(): void
     {
         Cache::forever(self::GENERATION_KEY, (string) Str::uuid());

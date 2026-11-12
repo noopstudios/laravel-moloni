@@ -80,8 +80,9 @@ it('reports every configured id missing from Moloni', function () {
 
     $problems = app(SettingsCheck::class)->problems();
 
-    expect($problems)->toHaveCount(7)
+    expect($problems)->toHaveCount(8)
         ->and(implode("\n", $problems))
+        ->toContain('fiscal zone PT')
         ->toContain('payment method')
         ->toContain('maturity date')
         ->toContain('top-level product category')
@@ -146,8 +147,8 @@ it('reports a list that cannot be read and still checks the others', function ()
 
     $problems = app(SettingsCheck::class)->problems();
 
-    expect($problems)->toHaveCount(2)
-        ->and(implode("\n", $problems))->toContain('paymentMethods/getAll')->toContain('tax 81');
+    expect($problems)->toHaveCount(3)
+        ->and(implode("\n", $problems))->toContain('paymentMethods/getAll')->toContain('tax 81')->toContain('fiscal zone PT');
 });
 
 it('checks against fresh lists rather than cached ones', function () {
@@ -168,6 +169,25 @@ it('matches exemption reasons on the AT code and falls back to the Moloni code',
 
     expect(app(SettingsCheck::class)->problems())
         ->toBe(['The exemption reason M44 configured for non_eu_consumer does not exist in Moloni.']);
+});
+
+it('falls back to the Moloni code when the AT code is empty', function () {
+    configureEverything();
+    fakeMoloniCatalog(['*/taxExemptions/getAll/*' => [
+        ['code' => 'M40', 'at_code' => ''],
+        ['code' => 'M44', 'at_code' => 'M44'],
+    ]]);
+
+    expect(app(SettingsCheck::class)->problems())->toBe([]);
+});
+
+it('reports a fiscal zone that none of the company taxes belong to', function () {
+    configureEverything();
+    useMoloniSettings(['fiscal_zone' => 'PT-MA']);
+    fakeMoloniCatalog();
+
+    expect(app(SettingsCheck::class)->problems())
+        ->toBe(['The fiscal zone PT-MA has no taxes in Moloni.']);
 });
 
 it('accepts an exemption whose Moloni code differs from its AT code', function () {

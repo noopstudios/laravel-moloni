@@ -42,13 +42,13 @@ it('finds a product by exact reference, ignoring partial matches', function () {
     fakeProductEndpoints([
         '*/products/getByReference/*' => [
             ['product_id' => 301, 'reference' => 'SRV-10'],
-            ['product_id' => 302, 'reference' => 'srv-1'],
-            ['product_id' => 304, 'reference' => 'SRV-1'],
+            ['product_id' => 302, 'reference' => 'XSRV-1'],
+            ['product_id' => 304, 'reference' => 'srv-1 '],
             ['product_id' => '303', 'reference' => 'SRV-1'],
         ],
     ]);
 
-    expect(app(ProductResolver::class)->resolve(new InvoiceLine('Setup', 1, '10', 23, reference: 'SRV-1')))->toBe(303);
+    expect(app(ProductResolver::class)->resolve(new InvoiceLine('Setup', 1, '10', 23, reference: ' SRV-1 ')))->toBe(303);
 
     Http::assertSent(fn (Request $request) => str_contains($request->url(), '/products/getByReference/')
         && $request['reference'] === 'SRV-1'
@@ -63,17 +63,17 @@ it('looks a reference up in Moloni only once per resolver', function () {
 
     $resolver->resolve(new InvoiceLine('Setup', 1, '10', 23, reference: 'SRV-1'));
 
-    expect($resolver->resolve(new InvoiceLine('Setup', 2, '10', 23, reference: 'SRV-1')))->toBe(303)
+    expect($resolver->resolve(new InvoiceLine('Setup', 2, '10', 23, reference: 'srv-1 ')))->toBe(303)
         ->and(productRequests('getByReference'))->toBe(1);
 });
 
 it('creates a service product when the reference does not exist', function () {
     fakeProductEndpoints([
-        '*/products/getByReference/*' => [['product_id' => 302, 'reference' => 'srv-1']],
+        '*/products/getByReference/*' => [['product_id' => 302, 'reference' => 'SRV-1-OLD']],
         '*/products/insert/*' => ['valid' => 1, 'product_id' => '401'],
     ]);
 
-    expect(app(ProductResolver::class)->resolve(new InvoiceLine('Setup', 3, '8.13008', 23, reference: 'SRV-1')))->toBe(401);
+    expect(app(ProductResolver::class)->resolve(new InvoiceLine('Setup', 3, '8.13008', 22.9996, reference: 'SRV-1 ')))->toBe(401);
 
     Http::assertSent(fn (Request $request) => str_contains($request->url(), '/products/insert/')
         && $request->data() === [
@@ -170,24 +170,38 @@ it('does not search again when Moloni refused the insert', function () {
         ->and(productRequests('getByReference'))->toBe(1);
 });
 
-it('treats a confirmed insert without a product id as Unknown', function () {
+it('searches once for a confirmed insert without a product id', function () {
     fakeProductEndpoints([
-        '*/products/getByReference/*' => Http::response([]),
+        '*/products/getByReference/*' => Http::sequence()
+            ->push([])
+            ->push([['product_id' => 404, 'reference' => 'SRV-1']]),
+        '*/products/insert/*' => ['valid' => 1],
+    ]);
+
+    expect(app(ProductResolver::class)->resolve(new InvoiceLine('Setup', 1, '10', 23, reference: 'SRV-1')))->toBe(404)
+        ->and(productRequests('getByReference'))->toBe(2);
+});
+
+it('treats a confirmed insert without a product id that cannot be found as Unknown', function () {
+    fakeProductEndpoints([
+        '*/products/getByReference/*' => Http::sequence()->push([])->push([]),
         '*/products/insert/*' => ['valid' => 1],
     ]);
 
     expect(catchMoloniException(fn () => app(ProductResolver::class)->resolve(new InvoiceLine('Setup', 1, '10', 23, reference: 'SRV-1')))->type)
-        ->toBe(FailureType::Unknown);
+        ->toBe(FailureType::Unknown)
+        ->and(productRequests('getByReference'))->toBe(2)
+        ->and(productRequests('insert'))->toBe(1);
 });
 
-it('falls back to the default product when the line has no reference', function () {
+it('falls back to the default product when the line has no reference', function (?string $reference) {
     useMoloniSettings(['default_product_id' => 71]);
     Http::fake();
 
-    expect(app(ProductResolver::class)->resolve(new InvoiceLine('Fee', 1, '10', 23)))->toBe(71);
+    expect(app(ProductResolver::class)->resolve(new InvoiceLine('Fee', 1, '10', 23, reference: $reference)))->toBe(71);
 
     Http::assertNothingSent();
-});
+})->with(['no reference' => [null], 'empty' => [''], 'blank' => ['   ']]);
 
 it('throws Validation when the line has no product, no reference and there is no default product', function () {
     Http::fake();

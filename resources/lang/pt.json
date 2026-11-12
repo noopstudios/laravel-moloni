@@ -16,5 +16,6 @@
     "The :setting setting has an invalid value for :key.": "A definição :setting tem um valor inválido para :key.",
     "No document set is configured for :type.": "Não está configurada nenhuma série de documentos para :type.",
     "No payment method is configured.": "Não está configurado nenhum método de pagamento.",
-    "No maturity date is configured for 0 days.": "Não está configurado nenhum prazo de vencimento de 0 dias."
+    "No maturity date is configured for 0 days.": "Não está configurado nenhum prazo de vencimento de 0 dias.",
+    "The fiscal zone :zone has no taxes in Moloni.": "A zona fiscal :zone não tem taxas de IVA no Moloni."
 }

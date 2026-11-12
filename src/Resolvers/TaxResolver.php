@@ -13,8 +13,6 @@ use Noop\Moloni\Settings\MoloniSettings;
  */
 class TaxResolver
 {
-    private const RATE_TOLERANCE = 0.001;
-
     public function __construct(
         private readonly MoloniCatalog $catalog,
         private readonly MoloniSettings $settings,
@@ -28,7 +26,24 @@ class TaxResolver
      */
     public function taxIdFor(float $rate): int
     {
-        if ($rate <= 0) {
+        return $this->tax($rate)['id'];
+    }
+
+    /**
+     * The rate as Moloni holds it for the tax taxIdFor() resolves (e.g. 13.4996 → 13.5), or 0 for a
+     * zero rate. Send and total with this rate, so the figures agree with Moloni's.
+     */
+    public function rateFor(float $rate): float
+    {
+        return InvoiceLine::isZeroRate($rate) ? 0.0 : $this->tax($rate)['rate'];
+    }
+
+    /**
+     * @return array{id: int, rate: float}
+     */
+    private function tax(float $rate): array
+    {
+        if (InvoiceLine::isZeroRate($rate)) {
             throw new MoloniException('A zero-rate line has no tax; it is sent with an exemption reason instead.', FailureType::Validation);
         }
 
@@ -37,13 +52,13 @@ class TaxResolver
 
         if ($override !== null) {
             // Moloni silently drops an unknown tax_id and issues the line without tax, so it must exist here.
-            $known = $taxes->contains(fn (array $row) => $this->id($row, 'tax_id') === $override && $this->sameRate($row['value'] ?? null, $rate));
+            $row = $taxes->first(fn (array $row) => $this->id($row, 'tax_id') === $override && $this->sameRate($row['value'] ?? null, $rate));
 
-            if (! $known) {
+            if ($row === null) {
                 throw new MoloniException("The tax {$override} configured for {$this->percent($rate)} is not a {$this->percent($rate)} tax in Moloni.", FailureType::Validation);
             }
 
-            return $override;
+            return ['id' => $override, 'rate' => $this->catalogRate($row, $rate)];
         }
 
         $zone = $this->settings->fiscal_zone;
@@ -60,13 +75,19 @@ class TaxResolver
         $chosen = $candidates->count() > 1
             ? $candidates->filter(fn (array $row) => $this->id($row, 'active_by_default') === 1)
             : $candidates;
-        $taxId = $chosen->count() === 1 ? $this->id($chosen->first(), 'tax_id') : null;
 
-        if ($taxId === null) {
+        if ($chosen->count() !== 1) {
             throw new MoloniException("Moloni has more than one {$this->percent($rate)} VAT tax in the fiscal zone {$zone}; choose one in the settings.", FailureType::Validation);
         }
 
-        return $taxId;
+        $row = $chosen->first();
+        $taxId = $this->id($row, 'tax_id');
+
+        if ($taxId === null) {
+            throw new MoloniException("Moloni returned the {$this->percent($rate)} VAT tax of the fiscal zone {$zone} without a usable id.", FailureType::Validation);
+        }
+
+        return ['id' => $taxId, 'rate' => $this->catalogRate($row, $rate)];
     }
 
     /**
@@ -75,9 +96,10 @@ class TaxResolver
      */
     public function assertExemption(InvoiceLine $line): void
     {
-        $code = $line->exemptionReason;
+        // An empty reason is no reason, on taxed and zero-rate lines alike.
+        $code = $line->exemptionReason === '' ? null : $line->exemptionReason;
 
-        if ($line->taxRate > 0) {
+        if (! $line->isZeroRated()) {
             if ($code !== null) {
                 throw new MoloniException("The line \"{$line->name}\" is taxed at {$this->percent($line->taxRate)} and cannot carry an exemption reason.", FailureType::Validation);
             }
@@ -85,14 +107,11 @@ class TaxResolver
             return;
         }
 
-        if ($code === null || $code === '') {
+        if ($code === null) {
             throw new MoloniException("The zero-rate line \"{$line->name}\" needs an exemption reason.", FailureType::Validation);
         }
 
-        // Matched on the AT code, which is what lines carry; Moloni's own code differs from it for some entries.
-        $known = $this->catalog->taxExemptions()->contains(fn (array $row) => (string) ($row['at_code'] ?? $row['code'] ?? '') === $code);
-
-        if (! $known) {
+        if (! $this->catalog->hasExemption($code)) {
             throw new MoloniException("The exemption reason {$code} does not exist in Moloni.", FailureType::Validation);
         }
     }
@@ -109,9 +128,21 @@ class TaxResolver
         return null;
     }
 
+    /**
+     * The rate of a tax already matched with sameRate(), so its value is numeric.
+     *
+     * @param  array<string, mixed>|null  $row
+     */
+    private function catalogRate(?array $row, float $rate): float
+    {
+        $value = $row['value'] ?? null;
+
+        return is_numeric($value) ? (float) $value : $rate;
+    }
+
     private function sameRate(mixed $value, float $rate): bool
     {
-        return is_numeric($value) && abs((float) $value - $rate) < self::RATE_TOLERANCE;
+        return is_numeric($value) && abs((float) $value - $rate) < InvoiceLine::RATE_TOLERANCE;
     }
 
     /**

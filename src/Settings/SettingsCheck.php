@@ -101,6 +101,11 @@ class SettingsCheck
                 fn (int $id) => __('The tax :id configured for :percentage% does not exist in Moloni.', ['id' => $id, 'percentage' => $percentage]));
         }
 
+        $zone = $this->settings->fiscal_zone;
+        if ($this->exists($this->catalog->taxes(...), fn (array $row) => ($row['fiscal_zone'] ?? null) === $zone) === false) {
+            $this->problems[] = __('The fiscal zone :zone has no taxes in Moloni.', ['zone' => $zone]);
+        }
+
         foreach ($this->settings->exemption_reasons as $case => $code) {
             $this->expectExemption($case, $code);
         }
@@ -165,8 +170,7 @@ class SettingsCheck
     }
 
     /**
-     * Exemptions are matched on the AT code, which is what invoice lines carry;
-     * Moloni's own code differs from it for some entries.
+     * Matched as invoice lines are (see MoloniCatalog::hasExemption()).
      */
     private function expectExemption(int|string $case, mixed $code): void
     {
@@ -176,9 +180,15 @@ class SettingsCheck
             return;
         }
 
-        $matches = fn (array $row) => (string) ($row['at_code'] ?? $row['code'] ?? '') === $code;
+        try {
+            $known = $this->catalog->hasExemption($code);
+        } catch (MoloniException $e) {
+            $this->readFailed($e);
 
-        if ($this->exists($this->catalog->taxExemptions(...), $matches) === false) {
+            return;
+        }
+
+        if (! $known) {
             $this->problems[] = __('The exemption reason :code configured for :case does not exist in Moloni.', ['code' => $code, 'case' => $case]);
         }
     }
@@ -215,15 +225,23 @@ class SettingsCheck
         try {
             $rows = $list();
         } catch (MoloniException $e) {
-            $problem = __('Could not read from Moloni: :reason', ['reason' => $e->getMessage()]);
-            if (! in_array($problem, $this->problems, true)) {
-                $this->problems[] = $problem;
-            }
+            $this->readFailed($e);
 
             return null;
         }
 
         return $rows->contains($matches);
+    }
+
+    /**
+     * Records a list that could not be read, once per reason.
+     */
+    private function readFailed(MoloniException $e): void
+    {
+        $problem = __('Could not read from Moloni: :reason', ['reason' => $e->getMessage()]);
+        if (! in_array($problem, $this->problems, true)) {
+            $this->problems[] = $problem;
+        }
     }
 
     /**

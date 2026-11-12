@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Http;
 use Noop\Moloni\Data\InvoiceLine;
 use Noop\Moloni\Enums\FailureType;
+use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Resolvers\TaxResolver;
 
 beforeEach(function () {
@@ -23,6 +24,7 @@ function fakeTaxCatalog(array $taxes): void
             ['code' => 'M07', 'at_code' => 'M07', 'name' => 'Isento artigo 9.º'],
             ['code' => 'M99X', 'at_code' => 'M99', 'name' => 'Não sujeito'],
             ['code' => 'M40', 'name' => 'Autoliquidação'],
+            ['code' => 'M50', 'at_code' => '', 'name' => 'Sem código AT'],
         ],
     ]);
 }
@@ -130,19 +132,38 @@ it('throws Validation when the override is a tax with another rate', function ()
     expect(catchMoloniException(fn () => app(TaxResolver::class)->taxIdFor(23))->type)->toBe(FailureType::Validation);
 });
 
-it('refuses to resolve a tax for a zero rate', function () {
+it('refuses to resolve a tax for a zero rate, including one that is zero within tolerance', function (float $rate) {
     fakeTaxCatalog([vatRow(82, 0)]);
 
-    expect(catchMoloniException(fn () => app(TaxResolver::class)->taxIdFor(0))->type)->toBe(FailureType::Validation);
+    expect(catchMoloniException(fn () => app(TaxResolver::class)->taxIdFor($rate))->type)->toBe(FailureType::Validation);
+})->with([0.0, 1e-15, 0.0009]);
+
+it('gives the catalog rate of the resolved tax', function () {
+    useMoloniSettings(['tax_overrides' => ['6' => 83]]);
+    fakeTaxCatalog([vatRow(81, 13.5), vatRow(83, 6)]);
+    $resolver = app(TaxResolver::class);
+
+    expect($resolver->rateFor(13.4996))->toBe(13.5)
+        ->and($resolver->rateFor(6.0004))->toBe(6.0)
+        ->and($resolver->rateFor(1e-15))->toBe(0.0);
+});
+
+it('reports a single matching tax without a usable id on its own', function () {
+    fakeTaxCatalog([vatRow(82, 23, ['tax_id' => 'abc'])]);
+
+    $e = catchMoloniException(fn () => app(TaxResolver::class)->taxIdFor(23));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->not->toContain('more than one')
+        ->and($e->getMessage())->toContain('id');
 });
 
 it('accepts a zero-rate line whose exemption reason is a Moloni AT code', function (string $code) {
     fakeTaxCatalog([]);
 
-    app(TaxResolver::class)->assertExemption(new InvoiceLine('Export', 1, '10', 0, exemptionReason: $code));
-
-    expect(true)->toBeTrue();
-})->with(['M07', 'M99', 'M40']);
+    expect(fn () => app(TaxResolver::class)->assertExemption(new InvoiceLine('Export', 1, '10', 0, exemptionReason: $code)))
+        ->not->toThrow(MoloniException::class);
+})->with(['M07', 'M99', 'M40', 'M50']);
 
 it('rejects a zero-rate line without a valid exemption reason', function (?string $code) {
     fakeTaxCatalog([]);
@@ -166,10 +187,19 @@ it('rejects an exemption reason on a taxed line', function () {
     Http::assertNothingSent();
 });
 
-it('accepts a taxed line without an exemption reason without calling Moloni', function () {
+it('accepts a taxed line without an exemption reason without calling Moloni', function (?string $reason) {
     fakeTaxCatalog([]);
 
-    app(TaxResolver::class)->assertExemption(new InvoiceLine('Fee', 1, '10', 23));
-
+    expect(fn () => app(TaxResolver::class)->assertExemption(new InvoiceLine('Fee', 1, '10', 23, exemptionReason: $reason)))
+        ->not->toThrow(MoloniException::class);
     Http::assertNothingSent();
+})->with([null, '']);
+
+it('treats a line whose rate is zero within tolerance as zero-rated', function () {
+    fakeTaxCatalog([]);
+
+    expect(catchMoloniException(fn () => app(TaxResolver::class)->assertExemption(new InvoiceLine('Export', 1, '10', 1e-15)))->type)
+        ->toBe(FailureType::Validation)
+        ->and(fn () => app(TaxResolver::class)->assertExemption(new InvoiceLine('Export', 1, '10', 1e-15, exemptionReason: 'M07')))
+        ->not->toThrow(MoloniException::class);
 });
