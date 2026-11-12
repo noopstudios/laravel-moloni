@@ -1,2 +1,15 @@
 {
+    "Could not log in to Moloni: :reason": "Não foi possível iniciar sessão no Moloni: :reason",
+    "Could not read from Moloni: :reason": "Não foi possível ler do Moloni: :reason",
+    "No Moloni company is configured.": "Não está configurada nenhuma empresa do Moloni.",
+    "The company :id does not exist in Moloni or this account cannot access it.": "A empresa :id não existe no Moloni ou esta conta não tem acesso a ela.",
+    "The :type document set :id does not exist in Moloni.": "A série de documentos :id para :type não existe no Moloni.",
+    "The :key payment method :id does not exist in Moloni.": "O método de pagamento :id para :key não existe no Moloni.",
+    "The :days-day maturity date :id does not exist in Moloni.": "O prazo de vencimento :id de :days dias não existe no Moloni.",
+    "The default product category :id does not exist in Moloni.": "A categoria de artigos predefinida :id não existe no Moloni.",
+    "The default measurement unit :id does not exist in Moloni.": "A unidade de medida predefinida :id não existe no Moloni.",
+    "The tax :id configured for :percentage% does not exist in Moloni.": "A taxa de IVA :id configurada para :percentage% não existe no Moloni.",
+    "The exemption reason :code configured for :case does not exist in Moloni.": "O motivo de isenção :code configurado para :case não existe no Moloni.",
+    "The default product :id does not exist in Moloni.": "O artigo predefinido :id não existe no Moloni.",
+    "The Moloni settings are valid.": "As definições do Moloni são válidas."
 }

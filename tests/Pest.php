@@ -2,6 +2,7 @@
 
 use Illuminate\Http\Client\Request;
 use Noop\Moloni\Exceptions\MoloniException;
+use Noop\Moloni\Settings\MoloniSettings;
 use Noop\Moloni\Tests\TestCase;
 use PHPUnit\Framework\Assert;
 
@@ -46,4 +47,12 @@ function isGrantRequest(Request $request, ?string $grantType = null): bool
 {
     return str_contains($request->url(), '/grant/')
         && ($grantType === null || $request['grant_type'] === $grantType);
+}
+
+/**
+ * @param  array<string, mixed>  $values
+ */
+function useMoloniSettings(array $values): void
+{
+    app(MoloniSettings::class)->fill($values)->save();
 }

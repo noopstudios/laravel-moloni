@@ -37,5 +37,6 @@ abstract class TestCase extends Orchestra
         $createSettingsTable();
 
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+        $this->loadMigrationsFrom(__DIR__.'/../database/settings');
     }
 }
