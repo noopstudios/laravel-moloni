@@ -26,6 +26,9 @@
         <env name="MOLONI_TIMEOUT" value="15" force="true"/>
         <env name="MOLONI_CONNECT_TIMEOUT" value="5" force="true"/>
         <env name="MOLONI_QUEUE_CONNECTION" value="database" force="true"/>
+        <env name="MOLONI_VIES_ENABLED" value="false" force="true"/>
+        <env name="MOLONI_VIES_URL" value="https://ec.europa.eu/taxation_customs/vies/rest-api" force="true"/>
+        <env name="MOLONI_VIES_TIMEOUT" value="5" force="true"/>
         <server name="MOLONI_CLIENT_ID" value="(null)"/>
         <server name="MOLONI_CLIENT_SECRET" value="(null)"/>
         <server name="MOLONI_EMAIL" value="(null)"/>
@@ -35,6 +38,9 @@
         <server name="MOLONI_TIMEOUT" value="15"/>
         <server name="MOLONI_CONNECT_TIMEOUT" value="5"/>
         <server name="MOLONI_QUEUE_CONNECTION" value="database"/>
+        <server name="MOLONI_VIES_ENABLED" value="false"/>
+        <server name="MOLONI_VIES_URL" value="https://ec.europa.eu/taxation_customs/vies/rest-api"/>
+        <server name="MOLONI_VIES_TIMEOUT" value="5"/>
     </php>
     <source>
         <include>

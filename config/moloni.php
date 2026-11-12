@@ -1,5 +1,7 @@
 <?php
 
+use Noop\Moloni\Tax\DefaultTaxRule;
+
 return [
 
     /*
@@ -72,5 +74,35 @@ return [
     */
 
     'queue_connection' => env('MOLONI_QUEUE_CONNECTION', 'database'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Tax rule
+    |--------------------------------------------------------------------------
+    |
+    | The Noop\Moloni\Tax\TaxRule implementation a checkout uses to decide the
+    | VAT rate and exemption of a customer before asking for payment. The
+    | package never applies it when issuing. Rebind the interface in the
+    | container to replace it altogether.
+    |
+    */
+
+    'tax_rule' => DefaultTaxRule::class,
+
+    /*
+    |--------------------------------------------------------------------------
+    | VIES
+    |--------------------------------------------------------------------------
+    |
+    | Optional validation of EU VAT numbers against the European Commission's
+    | VIES service. When disabled, an EU business is charged VAT.
+    |
+    */
+
+    'vies' => [
+        'enabled' => (bool) env('MOLONI_VIES_ENABLED', false),
+        'base_url' => env('MOLONI_VIES_URL', 'https://ec.europa.eu/taxation_customs/vies/rest-api'),
+        'timeout' => (int) env('MOLONI_VIES_TIMEOUT', 5),
+    ],
 
 ];

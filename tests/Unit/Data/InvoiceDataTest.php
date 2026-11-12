@@ -7,6 +7,7 @@ use Noop\Moloni\Data\CustomerData;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\InvoiceLine;
 use Noop\Moloni\Data\PaymentData;
+use Noop\Moloni\Tax\ViesResult;
 
 function idCustomer(): CustomerData
 {
@@ -129,4 +130,23 @@ it('round-trips payment data through an array', function () {
         ->and($copy->paidAt->equalTo($payment->paidAt))->toBeTrue()
         ->and($copy->amountCents)->toBe(3000)
         ->and(PaymentData::fromArray((new PaymentData('card', $payment->paidAt, 1))->toArray())->notes)->toBeNull();
+});
+
+it('round-trips the VIES result and reads a missing key as null', function () {
+    $vies = new ViesResult(true, true, 'REQ-1', CarbonImmutable::parse('2026-11-12 10:11:12.345678', 'Europe/Lisbon'));
+    $data = new InvoiceData(idCustomer(), [new InvoiceLine('X', 1, '1', 23)], vies: $vies);
+
+    $copy = InvoiceData::fromArray(json_decode(json_encode($data->toArray(), JSON_THROW_ON_ERROR), true));
+
+    expect($copy->vies?->valid)->toBeTrue()
+        ->and($copy->vies?->requestIdentifier)->toBe('REQ-1')
+        ->and($copy->vies?->checkedAt->format(CustomerData::DATE_FORMAT))->toBe($vies->checkedAt->format(CustomerData::DATE_FORMAT));
+
+    $withoutVies = InvoiceData::fromArray(idValidData());
+    expect($withoutVies->vies)->toBeNull()
+        ->and($withoutVies->toArray()['vies'])->toBeNull();
+
+    $legacy = idValidData();
+    unset($legacy['vies']);
+    expect(InvoiceData::fromArray($legacy)->vies)->toBeNull();
 });

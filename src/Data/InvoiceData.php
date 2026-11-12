@@ -4,6 +4,7 @@ namespace Noop\Moloni\Data;
 
 use InvalidArgumentException;
 use Noop\Moloni\Support\Payload;
+use Noop\Moloni\Tax\ViesResult;
 
 /**
  * What to bill: the customer and the lines, as the application knows them. Frozen in the
@@ -15,6 +16,7 @@ final readonly class InvoiceData
      * @param  list<InvoiceLine>  $lines
      * @param  string  $currency  ISO 4217 code.
      * @param  string|null  $yourReference  The customer's own reference, e.g. a purchase order.
+     * @param  ViesResult|null  $vies  The VIES check behind an EU exemption (TaxDecision::$vies), kept as evidence.
      */
     public function __construct(
         public CustomerData $customer,
@@ -22,6 +24,7 @@ final readonly class InvoiceData
         public string $currency = 'EUR',
         public ?string $yourReference = null,
         public ?string $notes = null,
+        public ?ViesResult $vies = null,
     ) {
         if ($lines === []) {
             throw new InvalidArgumentException('A document needs at least one line.');
@@ -57,7 +60,7 @@ final readonly class InvoiceData
     }
 
     /**
-     * @return array{customer: array<string, mixed>, lines: list<array<string, mixed>>, currency: string, yourReference: ?string, notes: ?string}
+     * @return array{customer: array<string, mixed>, lines: list<array<string, mixed>>, currency: string, yourReference: ?string, notes: ?string, vies: ?array<string, mixed>}
      */
     public function toArray(): array
     {
@@ -67,6 +70,7 @@ final readonly class InvoiceData
             'currency' => $this->currency,
             'yourReference' => $this->yourReference,
             'notes' => $this->notes,
+            'vies' => $this->vies?->toArray(),
         ];
     }
 
@@ -89,6 +93,7 @@ final readonly class InvoiceData
             currency: (string) Payload::required($data, 'currency', 'invoice data'),
             yourReference: isset($data['yourReference']) ? (string) $data['yourReference'] : null,
             notes: isset($data['notes']) ? (string) $data['notes'] : null,
+            vies: isset($data['vies']) && is_array($data['vies']) ? ViesResult::fromArray($data['vies']) : null,
         );
     }
 }

@@ -10,6 +10,8 @@ use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Http\TokenStore;
 use Noop\Moloni\Resolvers\ProductResolver;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Tax\DefaultTaxRule;
+use Noop\Moloni\Tax\TaxRule;
 
 class MoloniServiceProvider extends ServiceProvider
 {
@@ -25,6 +27,11 @@ class MoloniServiceProvider extends ServiceProvider
         ));
         $this->app->scoped(ProductResolver::class);
         $this->app->singleton(Moloni::class);
+        $this->app->bind(TaxRule::class, function ($app) {
+            $rule = config('moloni.tax_rule');
+
+            return $app->make(is_string($rule) && $rule !== '' ? $rule : DefaultTaxRule::class);
+        });
     }
 
     public function boot(): void
