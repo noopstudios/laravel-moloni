@@ -16,10 +16,8 @@ class MoloniServiceProvider extends ServiceProvider
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
         $this->loadJsonTranslationsFrom(__DIR__.'/../resources/lang');
 
-        if ($this->app->runningInConsole()) {
-            $this->publishes([
-                __DIR__.'/../config/moloni.php' => config_path('moloni.php'),
-            ], 'moloni-config');
-        }
+        $this->publishes([
+            __DIR__.'/../config/moloni.php' => config_path('moloni.php'),
+        ], 'moloni-config');
     }
 }

@@ -25,4 +25,17 @@ abstract class TestCase extends Orchestra
             'prefix' => '',
         ]);
     }
+
+    protected function defineDatabaseMigrations(): void
+    {
+        // spatie/laravel-settings ships its migration as a stub, which loadMigrationsFrom() does not pick up.
+        /** @var callable(): void $createSettingsTable */
+        $createSettingsTable = [
+            require __DIR__.'/../vendor/spatie/laravel-settings/database/migrations/create_settings_table.php.stub',
+            'up',
+        ];
+        $createSettingsTable();
+
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+    }
 }
