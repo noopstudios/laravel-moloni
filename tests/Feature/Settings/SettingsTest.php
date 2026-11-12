@@ -21,7 +21,8 @@ it('creates the moloni settings with their defaults when migrating', function ()
         ->and($settings->default_product_id)->toBeNull()
         ->and($settings->tax_overrides)->toBe([])
         ->and($settings->exemption_reasons)->toBe(['eu_business' => 'M40', 'non_eu_business' => 'M40', 'non_eu_consumer' => 'M44'])
-        ->and($settings->vies_unavailable)->toBe('charge');
+        ->and($settings->vies_unavailable)->toBe('charge')
+        ->and($settings->fiscal_zone)->toBe('PT');
 });
 
 it('registers the settings migration so the host app migrates it', function () {

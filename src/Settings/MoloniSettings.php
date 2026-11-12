@@ -34,6 +34,9 @@ class MoloniSettings extends Settings
     /** What to do when VIES cannot be reached: "charge" VAT or "block" the document. */
     public string $vies_unavailable;
 
+    /** Fiscal zone of the company's taxes in Moloni (PT, PT-AC or PT-MA); Moloni's company row does not carry it. */
+    public string $fiscal_zone;
+
     public static function group(): string
     {
         return 'moloni';

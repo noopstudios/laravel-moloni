@@ -6,6 +6,7 @@ use Illuminate\Support\ServiceProvider;
 use Noop\Moloni\Console\CheckCommand;
 use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Http\TokenStore;
+use Noop\Moloni\Resolvers\ProductResolver;
 use Noop\Moloni\Settings\MoloniSettings;
 
 class MoloniServiceProvider extends ServiceProvider
@@ -20,6 +21,7 @@ class MoloniServiceProvider extends ServiceProvider
             $app->make(TokenStore::class),
             fn () => $app->make(MoloniSettings::class)->companyIdOrNull(),
         ));
+        $this->app->scoped(ProductResolver::class);
     }
 
     public function boot(): void

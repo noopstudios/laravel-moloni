@@ -1,0 +1,78 @@
+<?php
+
+namespace Noop\Moloni\Data;
+
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
+use InvalidArgumentException;
+
+/**
+ * One line of a document to issue. Moloni ids are resolved from it just before issuing.
+ */
+final readonly class InvoiceLine
+{
+    /**
+     * @param  string  $unitNetPrice  Unit price without VAT, with at most 5 decimals (what Moloni stores).
+     * @param  float  $taxRate  VAT percentage, e.g. 23; 0 requires an exemption reason.
+     * @param  string|null  $exemptionReason  AT exemption code (e.g. M07) for a zero-rate line.
+     * @param  string|null  $reference  Moloni product reference; created as a service when missing.
+     * @param  int|null  $productId  Moloni product id, used as given.
+     */
+    public function __construct(
+        public string $name,
+        public float $quantity,
+        public string $unitNetPrice,
+        public float $taxRate,
+        public ?string $exemptionReason = null,
+        public ?string $reference = null,
+        public ?int $productId = null,
+        public string $summary = '',
+    ) {
+        if (trim($name) === '') {
+            throw new InvalidArgumentException('An invoice line needs a name.');
+        }
+
+        if (! is_finite($quantity) || $quantity <= 0) {
+            throw new InvalidArgumentException("The quantity of \"{$name}\" must be greater than zero.");
+        }
+
+        if (preg_match('/^\d+(\.\d{1,5})?$/', $unitNetPrice) !== 1) {
+            throw new InvalidArgumentException("The unit price of \"{$name}\" must be a non-negative number with at most 5 decimals.");
+        }
+
+        if (! is_finite($taxRate) || $taxRate < 0) {
+            throw new InvalidArgumentException("The tax rate of \"{$name}\" must be zero or more.");
+        }
+    }
+
+    /**
+     * quantity × unit price, rounded half up to cents, as Moloni rounds each line base.
+     */
+    public function lineNetCents(): int
+    {
+        return $this->toCents(self::decimal($this->quantity)->multipliedBy($this->unitNetPrice));
+    }
+
+    /**
+     * The rounded line base × rate, rounded half up to cents: Moloni rounds tax per line.
+     */
+    public function lineTaxCents(): int
+    {
+        $base = BigDecimal::ofUnscaledValue($this->lineNetCents(), 2);
+
+        return $this->toCents($base->multipliedBy(self::decimal($this->taxRate))->dividedByExact(100));
+    }
+
+    private function toCents(BigDecimal $amount): int
+    {
+        return $amount->toScale(2, RoundingMode::HalfUp)->getUnscaledValue()->toInt();
+    }
+
+    /**
+     * The float's shortest exact-round-trip form, so 0.1 is 0.1 and not 0.1000000000000000055….
+     */
+    private static function decimal(float $value): BigDecimal
+    {
+        return BigDecimal::of(var_export($value, true));
+    }
+}
