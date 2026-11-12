@@ -1,0 +1,14 @@
+includes:
+    - vendor/larastan/larastan/extension.neon
+
+parameters:
+    level: 8
+    paths:
+        - src
+        - config
+        - tests
+    ignoreErrors:
+        # Larastan only recognises the application's config path; this is the package's config file.
+        -
+            identifier: larastan.noEnvCallsOutsideOfConfig
+            path: config/moloni.php

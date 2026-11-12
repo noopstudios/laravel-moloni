@@ -1,0 +1,10 @@
+/vendor/
+composer.lock
+.phpunit.cache
+.phpunit.result.cache
+.env*
+!.env.sandbox.example
+.superpowers/
+.DS_Store
+.idea/
+.vscode/
