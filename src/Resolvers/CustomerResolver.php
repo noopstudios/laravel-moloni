@@ -50,14 +50,16 @@ class CustomerResolver
             return $this->create($customer, $vat, $number);
         }
 
-        $this->update($row, $customer);
+        if ($this->mayUpdate($row, $number)) {
+            $this->update($row, $customer);
+        }
 
         return $this->resolved($row);
     }
 
     /**
-     * {prefix}{yy}-{key}, with F at the end for a final consumer. Longer numbers lose the end of
-     * the key: Moloni allows 20 characters.
+     * {prefix}{yy}-{key}, with F at the end for a final consumer. Moloni allows 20 characters; a
+     * longer key is refused rather than cut, so two customers never share a number.
      */
     public function numberFor(CustomerData $customer): string
     {
@@ -79,7 +81,13 @@ class CustomerResolver
             throw new MoloniException("The prefix {$prefix} leaves no room for the customer key in a Moloni customer number.", FailureType::Validation);
         }
 
-        return $head.mb_substr(trim($customer->key), 0, $room).$suffix;
+        $key = trim($customer->key);
+
+        if (mb_strlen($key) > $room) {
+            throw new MoloniException("The customer key {$key} is too long for a Moloni customer number: with the prefix {$prefix} it can have at most {$room} characters.", FailureType::Validation);
+        }
+
+        return $head.$key.$suffix;
     }
 
     private function generic(): ResolvedCustomer
@@ -116,9 +124,7 @@ class CustomerResolver
         $sameVat = $vat === null ? Vat::isFinalConsumer($rowVat) : Vat::normalize($rowVat) === $vat;
 
         if (! $sameVat) {
-            $expected = $vat ?? Vat::FINAL_CONSUMER;
-
-            throw new MoloniException("The Moloni customer {$number} has the VAT number {$rowVat}, not {$expected}. Fix the customer in Moloni.", FailureType::Validation);
+            throw new MoloniException("The customer number {$number} already belongs to a customer with a different tax number in Moloni. Change that customer's number in Moloni or use another customer key.", FailureType::Validation);
         }
 
         return $row;
@@ -133,7 +139,7 @@ class CustomerResolver
         $matches = [];
 
         foreach ($this->connector->readAll($endpoint, $params) as $row) {
-            if (! is_array($row) || ! is_numeric($row['customer_id'] ?? null) || ! is_scalar($row[$field] ?? null)) {
+            if (! is_array($row) || ! is_numeric($row['customer_id'] ?? null) || ! is_scalar($row['number'] ?? null) || ! is_scalar($row[$field] ?? null)) {
                 continue;
             }
 
@@ -168,8 +174,24 @@ class CustomerResolver
     }
 
     /**
+     * In "own" mode only the customer numbered by this application is updated: VAT numbers of
+     * companies are public, so anyone could otherwise rewrite another customer's data.
+     *
+     * @param  array<string, mixed>  $row
+     */
+    private function mayUpdate(array $row, string $number): bool
+    {
+        return match (config('moloni.customer_updates')) {
+            'own' => (string) $row['number'] === $number,
+            'all' => true,
+            default => throw new MoloniException('moloni.customer_updates must be "own" or "all".', FailureType::Validation),
+        };
+    }
+
+    /**
      * Sends only the fields that changed. An empty value never blanks what Moloni has, and the VAT
-     * and number are never sent: Moloni silently ignores a VAT change once documents exist.
+     * and number are never sent: Moloni silently ignores a VAT change once documents exist. The
+     * country is only compared when it is known. A refused update leaves the customer as stored.
      *
      * @param  array<string, mixed>  $row
      */
@@ -180,7 +202,7 @@ class CustomerResolver
             'address' => $this->text($customer->address),
             'city' => $this->text($customer->city),
             'zip_code' => $this->postalCode($customer),
-            'country_id' => $this->catalog->countryId($customer->country),
+            'country_id' => $this->knownCountryId($customer->country),
             'email' => $this->text($customer->email),
         ];
         $changes = [];
@@ -193,8 +215,33 @@ class CustomerResolver
             }
         }
 
-        if ($changes !== []) {
+        if ($changes === []) {
+            return;
+        }
+
+        try {
             $this->connector->write('customers/update', ['customer_id' => (int) $row['customer_id'], ...$changes]);
+        } catch (MoloniException $e) {
+            if ($e->type !== FailureType::Validation) {
+                throw $e;
+            }
+        }
+    }
+
+    private function knownCountryId(?string $iso): ?int
+    {
+        if ($iso === null) {
+            return null;
+        }
+
+        try {
+            return $this->catalog->countryId($iso);
+        } catch (MoloniException $e) {
+            if ($e->type !== FailureType::Validation) {
+                throw $e;
+            }
+
+            return null;
         }
     }
 
@@ -207,17 +254,18 @@ class CustomerResolver
 
         $postalCode = $this->postalCode($customer) ?? ($this->isPortugal($customer) ? self::NO_PORTUGUESE_POSTAL_CODE : null);
         $email = $this->text($customer->email);
+        $country = $customer->country ?? 'PT';
 
         try {
             $result = $this->connector->write('customers/insert', [
                 'vat' => $vat ?? Vat::FINAL_CONSUMER,
                 'number' => $number,
                 'name' => $this->text($customer->name) ?? self::UNKNOWN,
-                'language_id' => $this->catalog->languageIdFor($customer->country),
+                'language_id' => $this->catalog->languageIdFor($country),
                 'address' => $this->text($customer->address) ?? self::UNKNOWN,
                 'city' => $this->text($customer->city) ?? self::UNKNOWN,
                 ...($postalCode !== null ? ['zip_code' => $postalCode] : []),
-                'country_id' => $this->catalog->countryId($customer->country),
+                'country_id' => $this->catalog->countryId($country),
                 ...($email !== null ? ['email' => $email] : []),
                 'maturity_date_id' => $maturityDateId,
                 'payment_method_id' => $paymentMethodId,
@@ -229,12 +277,13 @@ class CustomerResolver
                 'delivery_method_id' => 0,
             ]);
         } catch (MoloniException $e) {
-            if ($e->type !== FailureType::Unknown) {
+            if ($e->type !== FailureType::Unknown && ! $this->isDuplicate($e)) {
                 throw $e;
             }
 
-            // The customer may have been created: look once, never insert again blindly.
-            $row = $this->findAfterLostInsert($vat, $number) ?? throw $e;
+            // Lost response: the customer may have been created. Duplicate: it exists (a concurrent
+            // job, or stored in a form the search missed). Look once, never insert again blindly.
+            $row = $this->findAgain($vat, $number) ?? throw $e;
 
             return $this->resolved($row);
         }
@@ -249,13 +298,28 @@ class CustomerResolver
     /**
      * @return array<string, mixed>|null
      */
-    private function findAfterLostInsert(?string $vat, string $number): ?array
+    private function findAgain(?string $vat, string $number): ?array
     {
         try {
             return $this->find($vat, $number);
         } catch (MoloniException) {
             return null;
         }
+    }
+
+    private function isDuplicate(MoloniException $e): bool
+    {
+        if ($e->type !== FailureType::Validation) {
+            return false;
+        }
+
+        foreach ($e->errors as $error) {
+            if (is_array($error) && in_array($error['code'] ?? null, ['4 vat', '4 number'], true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -275,7 +339,7 @@ class CustomerResolver
 
     private function isPortugal(CustomerData $customer): bool
     {
-        return strtoupper($customer->country) === 'PT';
+        return strtoupper($customer->country ?? 'PT') === 'PT';
     }
 
     /**

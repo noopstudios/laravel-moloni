@@ -20,7 +20,7 @@ beforeEach(function () {
 /**
  * @param  array<string, mixed>  $overrides
  */
-function fakeCustomerEndpoints(array $overrides = []): void
+function crFakeEndpoints(array $overrides = []): void
 {
     Http::fake([
         '*/grant/*' => moloniGrant(),
@@ -36,7 +36,7 @@ function fakeCustomerEndpoints(array $overrides = []): void
  * @param  array<string, mixed>  $overrides
  * @return array<string, mixed>
  */
-function customerRow(array $overrides = []): array
+function crRow(array $overrides = []): array
 {
     return [
         'customer_id' => 301,
@@ -55,7 +55,7 @@ function customerRow(array $overrides = []): array
 /**
  * @param  array<string, mixed>  $overrides
  */
-function customerData(array $overrides = []): CustomerData
+function crCustomerData(array $overrides = []): CustomerData
 {
     return new CustomerData(...[
         'key' => 'U12',
@@ -70,7 +70,7 @@ function customerData(array $overrides = []): CustomerData
     ]);
 }
 
-function customerRequests(string $endpoint): int
+function crRequests(string $endpoint): int
 {
     return Http::recorded(fn (Request $request) => str_contains($request->url(), "/customers/{$endpoint}/"))->count();
 }
@@ -78,7 +78,7 @@ function customerRequests(string $endpoint): int
 /**
  * @return array<array-key, mixed>
  */
-function sentCustomerData(string $endpoint): array
+function crSentData(string $endpoint): array
 {
     $request = Http::recorded(fn (Request $request) => str_contains($request->url(), "/customers/{$endpoint}/"))->first()[0] ?? null;
 
@@ -86,43 +86,43 @@ function sentCustomerData(string $endpoint): array
 }
 
 it('finds a customer by exact VAT and ignores partial matches', function () {
-    fakeCustomerEndpoints(['*/customers/getByVat/*' => [
-        customerRow(['customer_id' => 300, 'vat' => '1509999999', 'number' => 'C1']),
-        customerRow(['customer_id' => 299, 'vat' => '50999999', 'number' => 'C2']),
-        customerRow(['customer_id' => '301', 'vat' => 'PT 509999999', 'number' => 'OLD-7']),
+    crFakeEndpoints(['*/customers/getByVat/*' => [
+        crRow(['customer_id' => 300, 'vat' => '1509999999', 'number' => 'C1']),
+        crRow(['customer_id' => 299, 'vat' => '50999999', 'number' => 'C2']),
+        crRow(['customer_id' => '301', 'vat' => 'PT 509999999', 'number' => 'OLD-7']),
     ]]);
 
-    $resolved = app(CustomerResolver::class)->resolve(customerData());
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData());
 
     expect($resolved->id)->toBe(301)
         ->and($resolved->number)->toBe('OLD-7')
-        ->and(customerRequests('getByNumber'))->toBe(0)
-        ->and(customerRequests('insert'))->toBe(0)
-        ->and(customerRequests('update'))->toBe(0);
+        ->and(crRequests('getByNumber'))->toBe(0)
+        ->and(crRequests('insert'))->toBe(0)
+        ->and(crRequests('update'))->toBe(0);
     Http::assertSent(fn (Request $request) => str_contains($request->url(), '/customers/getByVat/')
         && $request['vat'] === '509999999'
         && $request['company_id'] === 5);
 });
 
 it('prefers our number among several exact VAT matches, else the oldest customer', function (array $rows, int $expected) {
-    fakeCustomerEndpoints(['*/customers/getByVat/*' => $rows]);
+    crFakeEndpoints(['*/customers/getByVat/*' => $rows]);
 
-    expect(app(CustomerResolver::class)->resolve(customerData())->id)->toBe($expected);
+    expect(app(CustomerResolver::class)->resolve(crCustomerData())->id)->toBe($expected);
 })->with([
-    'our number' => [[customerRow(['customer_id' => 310, 'number' => 'X1']), customerRow(['customer_id' => 320, 'number' => 'GR26-U12'])], 320],
-    'lowest id' => [[customerRow(['customer_id' => 330, 'number' => 'X1']), customerRow(['customer_id' => 320, 'number' => 'X2'])], 320],
+    'our number' => [[crRow(['customer_id' => 310, 'number' => 'X1']), crRow(['customer_id' => 320, 'number' => 'GR26-U12'])], 320],
+    'lowest id' => [[crRow(['customer_id' => 330, 'number' => 'X1']), crRow(['customer_id' => 320, 'number' => 'X2'])], 320],
 ]);
 
 it('updates name and address when they changed, without sending vat or number', function () {
-    fakeCustomerEndpoints([
-        '*/customers/getByVat/*' => [customerRow()],
+    crFakeEndpoints([
+        '*/customers/getByVat/*' => [crRow()],
         '*/customers/update/*' => ['valid' => 1, 'customer_id' => 301],
     ]);
 
-    $resolved = app(CustomerResolver::class)->resolve(customerData(['name' => 'Acme SA', 'address' => 'Rua Dois 2']));
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData(['name' => 'Acme SA', 'address' => 'Rua Dois 2']));
 
     expect($resolved->id)->toBe(301)
-        ->and(sentCustomerData('update'))->toBe([
+        ->and(crSentData('update'))->toBe([
             'customer_id' => 301,
             'name' => 'Acme SA',
             'address' => 'Rua Dois 2',
@@ -131,16 +131,16 @@ it('updates name and address when they changed, without sending vat or number', 
 });
 
 it('updates the city, postal code, country and email when they changed', function () {
-    fakeCustomerEndpoints([
-        '*/customers/getByVat/*' => [customerRow(['vat' => 'ESB12345674'])],
+    crFakeEndpoints([
+        '*/customers/getByVat/*' => [crRow(['vat' => 'ESB12345674'])],
         '*/customers/update/*' => ['valid' => 1, 'customer_id' => 301],
     ]);
 
-    app(CustomerResolver::class)->resolve(customerData([
+    app(CustomerResolver::class)->resolve(crCustomerData([
         'vat' => 'ESB12345674', 'city' => 'Madrid', 'postalCode' => '28001', 'country' => 'ES', 'email' => 'new@acme.test',
     ]));
 
-    expect(sentCustomerData('update'))->toBe([
+    expect(crSentData('update'))->toBe([
         'customer_id' => 301,
         'city' => 'Madrid',
         'zip_code' => '28001',
@@ -151,30 +151,30 @@ it('updates the city, postal code, country and email when they changed', functio
 });
 
 it('does not call update when nothing changed', function () {
-    fakeCustomerEndpoints(['*/customers/getByVat/*' => [customerRow(['name' => ' Acme Lda ', 'country_id' => 1])]]);
+    crFakeEndpoints(['*/customers/getByVat/*' => [crRow(['name' => ' Acme Lda ', 'country_id' => 1])]]);
 
-    app(CustomerResolver::class)->resolve(customerData(['city' => 'Lisboa ']));
+    app(CustomerResolver::class)->resolve(crCustomerData(['city' => 'Lisboa ']));
 
-    expect(customerRequests('update'))->toBe(0);
+    expect(crRequests('update'))->toBe(0);
 });
 
 it('never blanks data Moloni already has', function () {
-    fakeCustomerEndpoints(['*/customers/getByVat/*' => [customerRow()]]);
+    crFakeEndpoints(['*/customers/getByVat/*' => [crRow()]]);
 
-    app(CustomerResolver::class)->resolve(customerData(['email' => null, 'address' => ' ', 'city' => null, 'postalCode' => 'invalid']));
+    app(CustomerResolver::class)->resolve(crCustomerData(['email' => null, 'address' => ' ', 'city' => null, 'postalCode' => 'invalid']));
 
-    expect(customerRequests('update'))->toBe(0);
+    expect(crRequests('update'))->toBe(0);
 });
 
 it('does not search by VAT for a final consumer and suffixes the number with F', function (?string $vat) {
-    fakeCustomerEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => '401']]);
+    crFakeEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => '401']]);
 
-    $resolved = app(CustomerResolver::class)->resolve(customerData(['vat' => $vat, 'name' => 'Ana Silva', 'isBusiness' => false]));
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData(['vat' => $vat, 'name' => 'Ana Silva', 'isBusiness' => false]));
 
     expect($resolved->id)->toBe(401)
         ->and($resolved->number)->toBe('GR26-U12F')
-        ->and(customerRequests('getByVat'))->toBe(0)
-        ->and(sentCustomerData('insert'))->toBe([
+        ->and(crRequests('getByVat'))->toBe(0)
+        ->and(crSentData('insert'))->toBe([
             'vat' => '999999990',
             'number' => 'GR26-U12F',
             'name' => 'Ana Silva',
@@ -197,59 +197,61 @@ it('does not search by VAT for a final consumer and suffixes the number with F',
 })->with(['no VAT' => [null], 'generic VAT' => ['999999990']]);
 
 it('finds a final consumer by exact number', function () {
-    fakeCustomerEndpoints(['*/customers/getByNumber/*' => [
-        customerRow(['customer_id' => 500, 'vat' => '999999990', 'number' => 'GR26-U12F1']),
-        customerRow(['customer_id' => 501, 'vat' => '999999990', 'number' => 'GR26-U12F']),
+    crFakeEndpoints(['*/customers/getByNumber/*' => [
+        crRow(['customer_id' => 500, 'vat' => '999999990', 'number' => 'GR26-U12F1']),
+        crRow(['customer_id' => 501, 'vat' => '999999990', 'number' => 'GR26-U12F']),
     ]]);
 
-    $resolved = app(CustomerResolver::class)->resolve(customerData(['vat' => null]));
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData(['vat' => null]));
 
     expect($resolved->id)->toBe(501)
-        ->and(customerRequests('insert'))->toBe(0);
+        ->and(crRequests('insert'))->toBe(0);
 });
 
 it('creates a business customer that does not exist yet', function () {
-    fakeCustomerEndpoints([
-        '*/customers/getByVat/*' => [customerRow(['vat' => '1509999999'])],
+    crFakeEndpoints([
+        '*/customers/getByVat/*' => [crRow(['vat' => '1509999999'])],
         '*/customers/insert/*' => ['valid' => 1, 'customer_id' => 402],
     ]);
 
-    $resolved = app(CustomerResolver::class)->resolve(customerData(['vat' => 'PT 509 999 999']));
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData(['vat' => 'PT 509 999 999']));
 
     expect($resolved->id)->toBe(402)
         ->and($resolved->number)->toBe('GR26-U12')
-        ->and(sentCustomerData('insert'))->toMatchArray(['vat' => '509999999', 'number' => 'GR26-U12', 'name' => 'Acme Lda']);
+        ->and(crSentData('insert'))->toMatchArray(['vat' => '509999999', 'number' => 'GR26-U12', 'name' => 'Acme Lda']);
 });
 
 it('refuses a customer whose number exists in Moloni with another VAT', function () {
-    fakeCustomerEndpoints(['*/customers/getByNumber/*' => [customerRow(['vat' => '501111110'])]]);
+    crFakeEndpoints(['*/customers/getByNumber/*' => [crRow(['vat' => '501111110'])]]);
 
-    $e = catchMoloniException(fn () => app(CustomerResolver::class)->resolve(customerData()));
+    $e = catchMoloniException(fn () => app(CustomerResolver::class)->resolve(crCustomerData()));
 
     expect($e->type)->toBe(FailureType::Validation)
-        ->and($e->getMessage())->toContain('501111110')
-        ->and(customerRequests('insert'))->toBe(0)
-        ->and(customerRequests('update'))->toBe(0);
+        ->and($e->getMessage())->toContain('GR26-U12')
+        ->and($e->getMessage())->toContain('customer key')
+        ->and($e->getMessage())->not->toContain('501111110')
+        ->and(crRequests('insert'))->toBe(0)
+        ->and(crRequests('update'))->toBe(0);
 });
 
 it('uses the generic customer when there is no billing data at all', function (?string $vat) {
-    fakeCustomerEndpoints(['*/customers/getByNumber/*' => [
-        customerRow(['customer_id' => 900, 'number' => '19999']),
-        customerRow(['customer_id' => '901', 'number' => '9999', 'name' => 'Consumidor final']),
+    crFakeEndpoints(['*/customers/getByNumber/*' => [
+        crRow(['customer_id' => 900, 'number' => '19999']),
+        crRow(['customer_id' => '901', 'number' => '9999', 'name' => 'Consumidor final']),
     ]]);
 
     $resolved = app(CustomerResolver::class)->resolve(new CustomerData(key: 'U12', vat: $vat, name: ' ', email: null, address: '', postalCode: '1000-001', city: 'Lisboa'));
 
     expect($resolved->id)->toBe(901)
         ->and($resolved->number)->toBe('9999')
-        ->and(customerRequests('getByVat'))->toBe(0)
-        ->and(customerRequests('insert'))->toBe(0)
-        ->and(customerRequests('update'))->toBe(0);
+        ->and(crRequests('getByVat'))->toBe(0)
+        ->and(crRequests('insert'))->toBe(0)
+        ->and(crRequests('update'))->toBe(0);
     Http::assertSent(fn (Request $request) => str_contains($request->url(), '/customers/getByNumber/') && $request['number'] === '9999');
 })->with(['no VAT' => [null], 'generic VAT' => ['999999990']]);
 
 it('fails when the generic customer does not exist in Moloni', function () {
-    fakeCustomerEndpoints(['*/customers/getByNumber/*' => [customerRow(['number' => '19999'])]]);
+    crFakeEndpoints(['*/customers/getByNumber/*' => [crRow(['number' => '19999'])]]);
 
     $e = catchMoloniException(fn () => app(CustomerResolver::class)->resolve(new CustomerData(key: 'U12', vat: null, name: null, email: null, address: null, postalCode: null, city: null)));
 
@@ -262,29 +264,37 @@ it('builds the number from prefix, year and key within 20 characters', function 
 
     expect($resolver->numberFor(new CustomerData(key: 'U12', vat: '509999999', name: 'A', email: null, address: null, postalCode: null, city: null)))
         ->toBe('GR26-U12')
-        ->and($resolver->numberFor(customerData(['createdAt' => Carbon::parse('2025-12-31')])))->toBe('GR25-U12')
-        ->and($resolver->numberFor(customerData(['key' => 'ORDER-1234567890123'])))->toBe('GR26-ORDER-123456789')
-        ->and($resolver->numberFor(customerData(['key' => 'ORDER-1234567890123', 'vat' => null])))->toBe('GR26-ORDER-12345678F');
+        ->and($resolver->numberFor(crCustomerData(['createdAt' => Carbon::parse('2025-12-31')])))->toBe('GR25-U12')
+        ->and($resolver->numberFor(crCustomerData(['key' => 'ORDER-123456789'])))->toBe('GR26-ORDER-123456789')
+        ->and($resolver->numberFor(crCustomerData(['key' => 'ORDER-12345678', 'vat' => null])))->toBe('GR26-ORDER-12345678F');
 });
+
+it('refuses a key that does not fit in the 20-character number instead of cutting it', function (?string $vat, int $max) {
+    $e = catchMoloniException(fn () => app(CustomerResolver::class)->numberFor(crCustomerData(['key' => 'ORDER-1234567890123', 'vat' => $vat])));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('too long')
+        ->and($e->getMessage())->toContain("at most {$max} characters");
+})->with(['company' => ['509999999', 15], 'final consumer' => [null, 14]]);
 
 it('refuses to build a number without a prefix or with one that leaves no room for the key', function (?string $prefix) {
     config(['moloni.prefix' => $prefix]);
 
-    expect(catchMoloniException(fn () => app(CustomerResolver::class)->numberFor(customerData()))->type)
+    expect(catchMoloniException(fn () => app(CustomerResolver::class)->numberFor(crCustomerData()))->type)
         ->toBe(FailureType::Validation);
 })->with(['missing' => [null], 'empty' => [''], 'too long' => ['ABCDEFGHIJKLMNOPQ']]);
 
 it('refuses to build a number without a key', function () {
-    expect(catchMoloniException(fn () => app(CustomerResolver::class)->numberFor(customerData(['key' => ' '])))->type)
+    expect(catchMoloniException(fn () => app(CustomerResolver::class)->numberFor(crCustomerData(['key' => ' '])))->type)
         ->toBe(FailureType::Validation);
 });
 
 it('replaces an invalid Portuguese postal code with 0000-000', function (?string $postalCode, string $expected) {
-    fakeCustomerEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => 403]]);
+    crFakeEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => 403]]);
 
-    app(CustomerResolver::class)->resolve(customerData(['postalCode' => $postalCode, 'address' => null, 'city' => ' ']));
+    app(CustomerResolver::class)->resolve(crCustomerData(['postalCode' => $postalCode, 'address' => null, 'city' => ' ']));
 
-    expect(sentCustomerData('insert'))->toMatchArray(['zip_code' => $expected, 'address' => 'Desconhecido', 'city' => 'Desconhecido']);
+    expect(crSentData('insert'))->toMatchArray(['zip_code' => $expected, 'address' => 'Desconhecido', 'city' => 'Desconhecido']);
 })->with([
     'invalid' => ['ABC', '0000-000'],
     'too short' => ['1000-01', '0000-000'],
@@ -294,12 +304,12 @@ it('replaces an invalid Portuguese postal code with 0000-000', function (?string
 ]);
 
 it('keeps a foreign VAT prefix and resolves the country from the catalog', function () {
-    fakeCustomerEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => 404]]);
+    crFakeEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => 404]]);
 
-    app(CustomerResolver::class)->resolve(customerData(['vat' => 'es b12345674', 'country' => 'ES', 'postalCode' => 'E-28001']));
+    app(CustomerResolver::class)->resolve(crCustomerData(['vat' => 'es b12345674', 'country' => 'ES', 'postalCode' => 'E-28001']));
 
     Http::assertSent(fn (Request $request) => str_contains($request->url(), '/customers/getByVat/') && $request['vat'] === 'ESB12345674');
-    expect(sentCustomerData('insert'))->toMatchArray([
+    expect(crSentData('insert'))->toMatchArray([
         'vat' => 'ESB12345674',
         'country_id' => 70,
         'language_id' => 2,
@@ -308,19 +318,19 @@ it('keeps a foreign VAT prefix and resolves the country from the catalog', funct
 });
 
 it('leaves out an empty foreign postal code', function () {
-    fakeCustomerEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => 405]]);
+    crFakeEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => 405]]);
 
-    app(CustomerResolver::class)->resolve(customerData(['vat' => 'ESB12345674', 'country' => 'ES', 'postalCode' => ' ']));
+    app(CustomerResolver::class)->resolve(crCustomerData(['vat' => 'ESB12345674', 'country' => 'ES', 'postalCode' => ' ']));
 
-    expect(sentCustomerData('insert'))->not->toHaveKey('zip_code');
+    expect(crSentData('insert'))->not->toHaveKey('zip_code');
 });
 
 it('does not create a customer without a maturity date or payment method in the settings', function (array $settings) {
     useMoloniSettings($settings);
-    fakeCustomerEndpoints();
+    crFakeEndpoints();
 
-    expect(catchMoloniException(fn () => app(CustomerResolver::class)->resolve(customerData()))->type)->toBe(FailureType::Validation)
-        ->and(customerRequests('insert'))->toBe(0);
+    expect(catchMoloniException(fn () => app(CustomerResolver::class)->resolve(crCustomerData()))->type)->toBe(FailureType::Validation)
+        ->and(crRequests('insert'))->toBe(0);
 })->with([
     'no zero-day maturity' => [['maturity_dates' => [30 => 12]]],
     'no payment method' => [['payment_methods' => []]],
@@ -328,42 +338,176 @@ it('does not create a customer without a maturity date or payment method in the 
 
 it('does not need the insert settings for a customer that exists', function () {
     useMoloniSettings(['maturity_dates' => [], 'payment_methods' => []]);
-    fakeCustomerEndpoints(['*/customers/getByVat/*' => [customerRow()]]);
+    crFakeEndpoints(['*/customers/getByVat/*' => [crRow()]]);
 
-    expect(app(CustomerResolver::class)->resolve(customerData())->id)->toBe(301);
+    expect(app(CustomerResolver::class)->resolve(crCustomerData())->id)->toBe(301);
 });
 
 it('uses the customer created when the insert response was lost', function () {
-    fakeCustomerEndpoints([
-        '*/customers/getByVat/*' => Http::sequence()->push([])->push([customerRow(['customer_id' => 406])]),
+    crFakeEndpoints([
+        '*/customers/getByVat/*' => Http::sequence()->push([])->push([crRow(['customer_id' => 406])]),
         '*/customers/insert/*' => Http::response('', 500),
     ]);
 
-    expect(app(CustomerResolver::class)->resolve(customerData())->id)->toBe(406)
-        ->and(customerRequests('insert'))->toBe(1)
-        ->and(customerRequests('getByVat'))->toBe(2)
-        ->and(customerRequests('update'))->toBe(0);
+    expect(app(CustomerResolver::class)->resolve(crCustomerData())->id)->toBe(406)
+        ->and(crRequests('insert'))->toBe(1)
+        ->and(crRequests('getByVat'))->toBe(2)
+        ->and(crRequests('update'))->toBe(0);
 });
 
 it('rethrows the lost insert when the customer still cannot be found', function (mixed $secondSearch) {
-    fakeCustomerEndpoints([
+    crFakeEndpoints([
         '*/customers/getByNumber/*' => Http::sequence()->push([])->push(...$secondSearch),
         '*/customers/insert/*' => Http::response('', 500),
     ]);
 
-    $e = catchMoloniException(fn () => app(CustomerResolver::class)->resolve(customerData(['vat' => null])));
+    $e = catchMoloniException(fn () => app(CustomerResolver::class)->resolve(crCustomerData(['vat' => null])));
 
     expect($e->type)->toBe(FailureType::Unknown)
-        ->and(customerRequests('insert'))->toBe(1)
-        ->and(customerRequests('getByNumber'))->toBe(2);
+        ->and(crRequests('insert'))->toBe(1)
+        ->and(crRequests('getByNumber'))->toBe(2);
 })->with([
     'not found' => [[[]]],
     'search failed' => [['', 500]],
 ]);
 
 it('does not search again when Moloni refused the insert', function () {
-    fakeCustomerEndpoints(['*/customers/insert/*' => [['code' => '4 vat', 'description' => "Field 'vat' must be unique"]]]);
+    crFakeEndpoints(['*/customers/insert/*' => [['code' => '1 address', 'description' => "Field 'address' is required"]]]);
 
-    expect(catchMoloniException(fn () => app(CustomerResolver::class)->resolve(customerData()))->type)->toBe(FailureType::Validation)
-        ->and(customerRequests('getByVat'))->toBe(1);
+    expect(catchMoloniException(fn () => app(CustomerResolver::class)->resolve(crCustomerData()))->type)->toBe(FailureType::Validation)
+        ->and(crRequests('getByVat'))->toBe(1);
+});
+
+it('uses the customer that already exists when Moloni refuses the insert as a duplicate', function (string $code, string $search) {
+    $existing = $search === 'getByNumber' ? ['vat' => '999999990', 'number' => 'GR26-U12F'] : [];
+    crFakeEndpoints([
+        "*/customers/{$search}/*" => Http::sequence()->push([])->push([crRow(['customer_id' => 407, ...$existing])]),
+        '*/customers/insert/*' => [['code' => $code, 'description' => 'Field must be unique']],
+    ]);
+
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData($search === 'getByNumber' ? ['vat' => null] : []));
+
+    expect($resolved->id)->toBe(407)
+        ->and(crRequests('insert'))->toBe(1)
+        ->and(crRequests($search))->toBe(2);
+})->with([
+    'duplicate VAT' => ['4 vat', 'getByVat'],
+    'duplicate number' => ['4 number', 'getByNumber'],
+]);
+
+it('rethrows the duplicate refusal when the customer still cannot be found', function () {
+    crFakeEndpoints(['*/customers/insert/*' => [['code' => '4 vat', 'description' => "Field 'vat' must be unique"]]]);
+
+    $e = catchMoloniException(fn () => app(CustomerResolver::class)->resolve(crCustomerData()));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->errors[0]['code'] ?? null)->toBe('4 vat')
+        ->and(crRequests('getByVat'))->toBe(2);
+});
+
+it('only updates the customer this application numbered in own mode', function () {
+    crFakeEndpoints(['*/customers/getByVat/*' => [crRow(['customer_id' => 310, 'number' => 'SHOP-7'])]]);
+
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData(['name' => 'Someone Else', 'email' => 'attacker@example.test']));
+
+    expect($resolved->id)->toBe(310)
+        ->and($resolved->number)->toBe('SHOP-7')
+        ->and(crRequests('update'))->toBe(0);
+});
+
+it('updates any matching customer in all mode', function () {
+    config(['moloni.customer_updates' => 'all']);
+    crFakeEndpoints([
+        '*/customers/getByVat/*' => [crRow(['customer_id' => 310, 'number' => 'SHOP-7'])],
+        '*/customers/update/*' => ['valid' => 1, 'customer_id' => 310],
+    ]);
+
+    app(CustomerResolver::class)->resolve(crCustomerData(['name' => 'Acme SA']));
+
+    expect(crSentData('update'))->toBe(['customer_id' => 310, 'name' => 'Acme SA', 'company_id' => 5]);
+});
+
+it('never updates the generic customer', function (string $mode) {
+    config(['moloni.customer_updates' => $mode]);
+    crFakeEndpoints(['*/customers/getByNumber/*' => [crRow(['customer_id' => 901, 'number' => '9999', 'name' => 'Consumidor final', 'city' => 'Porto'])]]);
+
+    $resolved = app(CustomerResolver::class)->resolve(new CustomerData(key: 'U12', vat: null, name: null, email: null, address: null, postalCode: '1000-001', city: 'Lisboa', country: 'ES'));
+
+    expect($resolved->id)->toBe(901)
+        ->and(crRequests('update'))->toBe(0);
+})->with(['own', 'all']);
+
+it('refuses an unknown customer update mode', function () {
+    config(['moloni.customer_updates' => 'some']);
+    crFakeEndpoints(['*/customers/getByVat/*' => [crRow()]]);
+
+    expect(catchMoloniException(fn () => app(CustomerResolver::class)->resolve(crCustomerData()))->type)->toBe(FailureType::Validation)
+        ->and(crRequests('update'))->toBe(0);
+});
+
+it('uses the customer as stored when Moloni refuses the update', function () {
+    crFakeEndpoints([
+        '*/customers/getByVat/*' => [crRow()],
+        '*/customers/update/*' => [['code' => '1 name', 'description' => "Field 'name' is required"]],
+    ]);
+
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData(['name' => 'Acme SA']));
+
+    expect($resolved->id)->toBe(301)
+        ->and($resolved->number)->toBe('GR26-U12')
+        ->and(crRequests('update'))->toBe(1);
+});
+
+it('lets an uncertain update fail', function (mixed $response, FailureType $type) {
+    crFakeEndpoints([
+        '*/customers/getByVat/*' => [crRow()],
+        '*/customers/update/*' => Http::response(...$response),
+    ]);
+
+    expect(catchMoloniException(fn () => app(CustomerResolver::class)->resolve(crCustomerData(['name' => 'Acme SA'])))->type)->toBe($type);
+})->with([
+    'unknown' => [['', 500], FailureType::Unknown],
+    'access denied' => [['', 403], FailureType::Authentication],
+]);
+
+it('does not touch the country of an existing customer when the country is unknown', function () {
+    crFakeEndpoints(['*/customers/getByVat/*' => [crRow(['country_id' => 70])]]);
+
+    expect(app(CustomerResolver::class)->resolve(crCustomerData(['country' => null]))->id)->toBe(301)
+        ->and(crRequests('update'))->toBe(0);
+});
+
+it('ignores a country Moloni does not know when updating, but not when creating', function () {
+    crFakeEndpoints([
+        '*/customers/getByVat/*' => Http::sequence()->push([crRow(['name' => 'Old name'])])->push([]),
+        '*/customers/update/*' => ['valid' => 1, 'customer_id' => 301],
+    ]);
+    $resolver = app(CustomerResolver::class);
+
+    $resolver->resolve(crCustomerData(['country' => 'XX']));
+
+    expect(crSentData('update'))->toBe(['customer_id' => 301, 'name' => 'Acme Lda', 'company_id' => 5])
+        ->and(catchMoloniException(fn () => $resolver->resolve(crCustomerData(['country' => 'XX'])))->type)->toBe(FailureType::Validation)
+        ->and(crRequests('insert'))->toBe(0);
+});
+
+it('creates a customer of unknown country as Portuguese', function () {
+    crFakeEndpoints(['*/customers/insert/*' => ['valid' => 1, 'customer_id' => 408]]);
+
+    app(CustomerResolver::class)->resolve(crCustomerData(['country' => null, 'postalCode' => 'ABC']));
+
+    expect(crSentData('insert'))->toMatchArray(['country_id' => 1, 'language_id' => 1, 'zip_code' => '0000-000']);
+});
+
+it('skips rows without a usable number', function () {
+    crFakeEndpoints(['*/customers/getByVat/*' => [
+        crRow(['customer_id' => 100, 'number' => null]),
+        crRow(['customer_id' => 101, 'number' => ['x']]),
+        crRow(['customer_id' => 320, 'number' => 'X2']),
+    ]]);
+
+    $resolved = app(CustomerResolver::class)->resolve(crCustomerData());
+
+    expect($resolved->id)->toBe(320)
+        ->and($resolved->number)->toBe('X2');
 });

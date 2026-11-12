@@ -35,6 +35,26 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Customer updates
+    |--------------------------------------------------------------------------
+    |
+    | Which existing Moloni customers a document may update with its billing
+    | data (name, address, postal code, city, country and email).
+    |
+    | "own": only customers whose number this application generated for that
+    |        customer. Any other customer found by VAT number is used as it is
+    |        stored, so a buyer cannot rewrite another company's data just by
+    |        typing its (public) VAT number.
+    | "all": any customer found by VAT number or customer number.
+    |
+    | Moloni's generic final-consumer customer (9999) is never updated.
+    |
+    */
+
+    'customer_updates' => env('MOLONI_CUSTOMER_UPDATES', 'own'),
+
+    /*
+    |--------------------------------------------------------------------------
     | HTTP client
     |--------------------------------------------------------------------------
     */
