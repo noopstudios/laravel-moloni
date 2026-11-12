@@ -3,6 +3,7 @@
 namespace Noop\Moloni\Data;
 
 use InvalidArgumentException;
+use Noop\Moloni\Support\Payload;
 
 /**
  * What to bill: the customer and the lines, as the application knows them. Frozen in the
@@ -70,19 +71,22 @@ final readonly class InvoiceData
     }
 
     /**
-     * @param  array<string, mixed>  $data  As returned by toArray().
+     * @param  array<array-key, mixed>  $data  As returned by toArray().
      */
     public static function fromArray(array $data): self
     {
-        /** @var array<string, mixed> $customer */
-        $customer = $data['customer'];
-        /** @var list<array<string, mixed>> $lines */
-        $lines = $data['lines'];
+        $lines = [];
+        foreach (Payload::requiredArray($data, 'lines', 'invoice data') as $line) {
+            if (! is_array($line)) {
+                throw new InvalidArgumentException('The frozen invoice data has an invalid line.');
+            }
+            $lines[] = InvoiceLine::fromArray($line);
+        }
 
         return new self(
-            customer: CustomerData::fromArray($customer),
-            lines: array_map(fn (array $line) => InvoiceLine::fromArray($line), $lines),
-            currency: (string) ($data['currency'] ?? 'EUR'),
+            customer: CustomerData::fromArray(Payload::requiredArray($data, 'customer', 'invoice data')),
+            lines: $lines,
+            currency: (string) Payload::required($data, 'currency', 'invoice data'),
             yourReference: isset($data['yourReference']) ? (string) $data['yourReference'] : null,
             notes: isset($data['notes']) ? (string) $data['notes'] : null,
         );

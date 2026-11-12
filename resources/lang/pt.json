@@ -27,7 +27,7 @@
     "Issuing": "A emitir",
     "Issued": "Emitido",
     "Failed": "Falhado",
-    "Unknown": "Por confirmar",
+    "Awaiting confirmation": "Por confirmar",
     "Superseded": "Substituído",
     "Voided": "Anulado"
 }

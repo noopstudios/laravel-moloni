@@ -35,7 +35,7 @@ enum DocumentStatus: string implements HasColor, HasLabel
             self::Issuing => __('Issuing'),
             self::Issued => __('Issued'),
             self::Failed => __('Failed'),
-            self::Unknown => __('Unknown'),
+            self::Unknown => __('Awaiting confirmation'),
             self::Superseded => __('Superseded'),
             self::Voided => __('Voided'),
         };

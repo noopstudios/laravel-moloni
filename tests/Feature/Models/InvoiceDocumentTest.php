@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Noop\Moloni\Data\InvoiceData;
@@ -9,9 +10,13 @@ use Noop\Moloni\Models\InvoiceDocument;
 use Noop\Moloni\Models\InvoiceDocumentLink;
 use Noop\Moloni\Tests\Fixtures\Order;
 
-beforeEach(function () {
-    Order::createTable();
-});
+/**
+ * @param  array<string, mixed>  $attributes
+ */
+function idmFor(Model $invoiceable, DocumentType $type, DocumentStatus $status = DocumentStatus::Pending, array $attributes = []): InvoiceDocument
+{
+    return InvoiceDocument::factory()->for($invoiceable, 'invoiceable')->create(['type' => $type, 'status' => $status, ...$attributes]);
+}
 
 function idmSettle(InvoiceDocument $settler, InvoiceDocument $invoice, int $cents): void
 {
@@ -61,8 +66,15 @@ function idmFixtures(): array
     idmSettle(InvoiceDocument::factory()->receipt()->failed()->create(), $invoice, 5000);
     idmSettle(InvoiceDocument::factory()->receipt()->create(['status' => DocumentStatus::Superseded]), $invoice, 5000);
     idmSettle(InvoiceDocument::factory()->creditNote()->create(['status' => DocumentStatus::Voided]), $invoice, 5000);
-    // An invoice that points at another (a conversion) does not settle it.
+    idmSettle(InvoiceDocument::factory()->receipt()->create(['status' => DocumentStatus::Voided]), $invoice, 5000);
+    idmSettle(InvoiceDocument::factory()->creditNote()->failed()->create(), $invoice, 5000);
+    idmSettle(InvoiceDocument::factory()->creditNote()->create(['status' => DocumentStatus::Superseded]), $invoice, 5000);
+    // Documents that point at another without settling it: conversions and unrelated types.
     idmSettle(InvoiceDocument::factory()->invoice()->issued()->create(), $invoice, 9999);
+    idmSettle(InvoiceDocument::factory()->proforma()->issued()->create(), $invoice, 9999);
+    idmSettle(InvoiceDocument::factory()->invoiceReceipt()->issued()->create(), $invoice, 9999);
+    idmSettle(InvoiceDocument::factory()->proforma()->issued()->create(), $docs['unpaid'], 1500);
+    idmSettle(InvoiceDocument::factory()->invoiceReceipt()->create(), $docs['unpaid'], 1500);
 
     idmSettle(InvoiceDocument::factory()->receipt()->issued()->create(), $docs['paid'], 2000);
     idmSettle(InvoiceDocument::factory()->receipt()->issued()->create(), $docs['overpaid'], 1500);
@@ -70,25 +82,95 @@ function idmFixtures(): array
     return $docs;
 }
 
-it('allows only one live invoice or invoice-receipt per invoiceable', function () {
+it('allows only one live invoice or invoice-receipt per invoiceable', function (DocumentType $first, DocumentType $second, DocumentStatus $status) {
     $order = Order::create();
-    $key = InvoiceDocument::activeKeyFor($order);
+    $live = idmFor($order, $first);
 
-    InvoiceDocument::factory()->invoice()->create(['active_key' => $key]);
+    expect($live->active_key)->toBe(InvoiceDocument::activeKeyFor($order))
+        ->and(fn () => idmFor($order, $second, $status))->toThrow(QueryException::class);
+})->with([
+    'invoice then invoice' => [DocumentType::Invoice, DocumentType::Invoice, DocumentStatus::Pending],
+    'invoice then invoice-receipt' => [DocumentType::Invoice, DocumentType::InvoiceReceipt, DocumentStatus::Issued],
+    'invoice-receipt then invoice' => [DocumentType::InvoiceReceipt, DocumentType::Invoice, DocumentStatus::Unknown],
+    'invoice then issuing invoice' => [DocumentType::Invoice, DocumentType::Invoice, DocumentStatus::Issuing],
+]);
 
-    expect(fn () => InvoiceDocument::factory()->invoiceReceipt()->create(['active_key' => $key]))
-        ->toThrow(QueryException::class);
+it('derives the active key on save, ignoring an assigned one', function () {
+    $order = Order::create();
+    $other = Order::create();
+
+    $document = idmFor($order, DocumentType::Invoice);
+    $document->active_key = 'forged';
+    $document->save();
+
+    expect($document->fresh()?->active_key)->toBe(InvoiceDocument::activeKeyFor($order))
+        ->and(InvoiceDocument::factory()->invoice()->create()->active_key)->toBeNull()
+        ->and(idmFor($other, DocumentType::Receipt)->active_key)->toBeNull()
+        ->and(idmFor($other, DocumentType::CreditNote)->active_key)->toBeNull()
+        ->and(idmFor($other, DocumentType::Proforma)->active_key)->toBeNull()
+        ->and(idmFor($other, DocumentType::Invoice, DocumentStatus::Failed)->active_key)->toBeNull();
 });
 
-it('frees the active key for a new document once released', function () {
+it('frees the slot when the live document stops being live', function (DocumentStatus $status) {
     $order = Order::create();
-    $failed = InvoiceDocument::factory()->invoice()->failed()->create(['active_key' => InvoiceDocument::activeKeyFor($order)]);
+    $first = idmFor($order, DocumentType::Invoice, DocumentStatus::Issued);
 
-    $failed->releaseActiveKey()->save();
-    $next = InvoiceDocument::factory()->invoice()->create(['active_key' => InvoiceDocument::activeKeyFor($order)]);
+    $first->update(['status' => $status]);
+    $next = idmFor($order, DocumentType::InvoiceReceipt);
 
-    expect($failed->fresh()?->active_key)->toBeNull()
-        ->and($next->active_key)->toBe($order->getMorphClass().':'.$order->id.':invoice');
+    expect($first->fresh()?->active_key)->toBeNull()
+        ->and($next->active_key)->toBe(InvoiceDocument::activeKeyFor($order));
+})->with([DocumentStatus::Failed, DocumentStatus::Superseded, DocumentStatus::Voided]);
+
+it('re-acquires the slot when a failed document goes back to pending', function () {
+    $order = Order::create();
+    $failed = idmFor($order, DocumentType::Invoice, DocumentStatus::Failed);
+
+    $failed->update(['status' => DocumentStatus::Pending]);
+
+    expect($failed->fresh()?->active_key)->toBe(InvoiceDocument::activeKeyFor($order));
+});
+
+it('cannot revive a failed document while another one is live', function () {
+    $order = Order::create();
+    $failed = idmFor($order, DocumentType::Invoice, DocumentStatus::Failed);
+    idmFor($order, DocumentType::Invoice);
+
+    expect(fn () => $failed->update(['status' => DocumentStatus::Pending]))->toThrow(QueryException::class);
+});
+
+it('refuses keys for an unsaved invoiceable', function () {
+    expect(fn () => InvoiceDocument::activeKeyFor(new Order))->toThrow(LogicException::class)
+        ->and(fn () => InvoiceDocument::operationKey(DocumentType::Invoice, new Order, 1))->toThrow(LogicException::class);
+});
+
+it('keeps active_key out of mass assignment', function () {
+    $document = new InvoiceDocument(['active_key' => 'forged', 'reference' => 'R']);
+
+    expect($document->active_key)->toBeNull()
+        ->and($document->reference)->toBe('R')
+        ->and((new InvoiceDocumentLink(['id' => 9, 'amount_cents' => 1]))->id)->toBeNull();
+});
+
+it('rejects a negative link amount', function () {
+    $invoice = InvoiceDocument::factory()->invoice()->issued()->create();
+    $receipt = InvoiceDocument::factory()->receipt()->issued()->create();
+
+    expect(fn () => idmSettle($receipt, $invoice, -1))->toThrow(InvalidArgumentException::class)
+        ->and(InvoiceDocumentLink::count())->toBe(0);
+
+    idmSettle($receipt, $invoice, 0);
+    expect(InvoiceDocumentLink::count())->toBe(1);
+});
+
+it('never deletes a document that has ledger links', function () {
+    $invoice = InvoiceDocument::factory()->invoice()->issued()->create();
+    $receipt = InvoiceDocument::factory()->receipt()->issued()->create();
+    idmSettle($receipt, $invoice, 100);
+
+    expect(fn () => $receipt->delete())->toThrow(QueryException::class)
+        ->and(fn () => $invoice->delete())->toThrow(QueryException::class)
+        ->and(InvoiceDocument::count())->toBe(2);
 });
 
 it('rejects a second row with the same operation key', function () {
@@ -206,7 +288,7 @@ it('lists open invoices for a normalized VAT, oldest first', function () {
 it('agrees with outstandingCents on which invoices are open', function () {
     $docs = idmFixtures();
 
-    $open = collect($docs)
+    $open = InvoiceDocument::all()
         ->filter(fn (InvoiceDocument $doc) => $doc->type === DocumentType::Invoice
             && $doc->status === DocumentStatus::Issued
             && $doc->customer_vat === '509999999'
@@ -216,7 +298,8 @@ it('agrees with outstandingCents on which invoices are open', function () {
         ->values()
         ->all();
 
-    expect(InvoiceDocument::openForVat('509999999')->pluck('id')->sort()->values()->all())->toBe($open);
+    expect(InvoiceDocument::openForVat('509999999')->pluck('id')->sort()->values()->all())->toBe($open)
+        ->and($open)->toBe(collect([$docs['partly paid']->id, $docs['unpaid']->id])->sort()->values()->all());
 });
 
 it('never groups final consumers by VAT', function (string $vat) {
@@ -246,6 +329,11 @@ it('labels and colours types and statuses in Portuguese', function () {
         ->toBe(['Pendente', 'A emitir', 'Emitido', 'Falhado', 'Por confirmar', 'Substituído', 'Anulado'])
         ->and(array_map(fn (DocumentStatus $s) => $s->getColor(), DocumentStatus::cases()))
         ->toBe(['gray', 'info', 'success', 'danger', 'warning', 'gray', 'gray']);
+});
+
+it('keeps generic English translation keys free for the host app', function () {
+    expect(DocumentStatus::Unknown->getLabel())->toBe('Awaiting confirmation')
+        ->and(json_decode((string) file_get_contents(__DIR__.'/../../../resources/lang/pt.json'), true))->not->toHaveKey('Unknown');
 });
 
 it('knows live statuses and debt-settling types', function () {

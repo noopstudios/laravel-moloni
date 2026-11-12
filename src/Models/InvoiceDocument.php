@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Carbon;
+use LogicException;
 use Noop\Moloni\Database\Factories\InvoiceDocumentFactory;
 use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
@@ -24,8 +25,9 @@ use Noop\Moloni\Support\Vat;
  * - `operation_key` identifies the request, so repeating it cannot create a second row:
  *   "{type}:{morph_class}:{id}:{sequence}" for invoices and invoice-receipts (see operationKey()).
  * - `active_key` allows one live invoice OR invoice-receipt per invoiceable:
- *   "{morph_class}:{id}:invoice" (see activeKeyFor()). It is null for every other type and must be
- *   released (set to null) when the row stops being live (failed, superseded, voided).
+ *   "{morph_class}:{id}:invoice" (see activeKeyFor()). It is derived on every save: set for a live
+ *   invoice or invoice-receipt with an invoiceable, null otherwise, so a row that stops being live
+ *   frees the slot and one that becomes live again takes it back (or fails if it is taken).
  *
  * @property int $id
  * @property string|null $invoiceable_type
@@ -59,7 +61,31 @@ class InvoiceDocument extends Model
     /** @use HasFactory<InvoiceDocumentFactory> */
     use HasFactory;
 
-    protected $guarded = [];
+    /** Everything the package writes; `active_key` is derived on save and never assigned. */
+    protected $fillable = [
+        'invoiceable_type',
+        'invoiceable_id',
+        'type',
+        'operation_key',
+        'status',
+        'company_id',
+        'document_set_id',
+        'reference',
+        'currency',
+        'expected_total_cents',
+        'customer_vat',
+        'customer_number',
+        'customer_id',
+        'document_id',
+        'document_number',
+        'issued_at',
+        'due_at',
+        'vies',
+        'payload',
+        'error_type',
+        'error_message',
+        'attempts',
+    ];
 
     protected $attributes = [
         'currency' => 'EUR',
@@ -84,6 +110,13 @@ class InvoiceDocument extends Model
         ];
     }
 
+    protected static function booted(): void
+    {
+        static::saving(function (self $document) {
+            $document->active_key = $document->derivedActiveKey();
+        });
+    }
+
     protected static function newFactory(): InvoiceDocumentFactory
     {
         return InvoiceDocumentFactory::new();
@@ -91,22 +124,33 @@ class InvoiceDocument extends Model
 
     public static function activeKeyFor(Model $invoiceable): string
     {
-        return $invoiceable->getMorphClass().':'.$invoiceable->getKey().':invoice';
+        return $invoiceable->getMorphClass().':'.self::keyOf($invoiceable).':invoice';
     }
 
     public static function operationKey(DocumentType $type, Model $invoiceable, int|string $suffix): string
     {
-        return $type->value.':'.$invoiceable->getMorphClass().':'.$invoiceable->getKey().':'.$suffix;
+        return $type->value.':'.$invoiceable->getMorphClass().':'.self::keyOf($invoiceable).':'.$suffix;
     }
 
-    /**
-     * Frees the invoiceable for a new invoice or invoice-receipt. Does not save.
-     */
-    public function releaseActiveKey(): static
+    private static function keyOf(Model $invoiceable): string
     {
-        $this->active_key = null;
+        $key = $invoiceable->getKey();
 
-        return $this;
+        if ($key === null) {
+            throw new LogicException('Documents can only be keyed to a saved '.$invoiceable::class.'.');
+        }
+
+        return (string) $key;
+    }
+
+    private function derivedActiveKey(): ?string
+    {
+        $holdsSlot = in_array($this->type, [DocumentType::Invoice, DocumentType::InvoiceReceipt], true)
+            && $this->status->isLive()
+            && $this->invoiceable_type !== null
+            && $this->invoiceable_id !== null;
+
+        return $holdsSlot ? $this->invoiceable_type.':'.$this->invoiceable_id.':invoice' : null;
     }
 
     /**
@@ -140,6 +184,9 @@ class InvoiceDocument extends Model
     /**
      * What an invoice still owes: its total minus what live receipts and credit notes allocate
      * to it, never below zero. Zero for every other type.
+     *
+     * The invoice's own status is ignored: a pending, failed or voided invoice still reports an
+     * amount. Callers allocating receipts or credit notes must require the invoice to be Issued.
      */
     public function outstandingCents(): int
     {
@@ -172,13 +219,13 @@ class InvoiceDocument extends Model
         }
 
         $query
-            ->where('type', DocumentType::Invoice)
-            ->where('status', DocumentStatus::Issued)
-            ->where('customer_vat', $vat)
-            ->where('expected_total_cents', '>', fn (QueryBuilder $settled) => self::settledCentsQuery($settled)
+            ->where($query->qualifyColumn('type'), DocumentType::Invoice)
+            ->where($query->qualifyColumn('status'), DocumentStatus::Issued)
+            ->where($query->qualifyColumn('customer_vat'), $vat)
+            ->where($query->qualifyColumn('expected_total_cents'), '>', fn (QueryBuilder $settled) => self::settledCentsQuery($settled)
                 ->whereColumn('l.associated_document_id', $query->qualifyColumn('id')))
-            ->orderBy('issued_at')
-            ->orderBy('id');
+            ->orderBy($query->qualifyColumn('issued_at'))
+            ->orderBy($query->qualifyColumn('id'));
     }
 
     /**

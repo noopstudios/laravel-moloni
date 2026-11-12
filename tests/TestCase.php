@@ -23,6 +23,7 @@ abstract class TestCase extends Orchestra
             'driver' => 'sqlite',
             'database' => ':memory:',
             'prefix' => '',
+            'foreign_key_constraints' => true,
         ]);
     }
 
@@ -38,5 +39,6 @@ abstract class TestCase extends Orchestra
 
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
         $this->loadMigrationsFrom(__DIR__.'/../database/settings');
+        $this->loadMigrationsFrom(__DIR__.'/database/migrations');
     }
 }

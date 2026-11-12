@@ -5,6 +5,7 @@ namespace Noop\Moloni\Data;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use InvalidArgumentException;
+use Noop\Moloni\Support\Payload;
 
 /**
  * A payment received, for an invoice-receipt or a receipt.
@@ -43,14 +44,14 @@ final readonly class PaymentData
     }
 
     /**
-     * @param  array<string, mixed>  $data  As returned by toArray().
+     * @param  array<array-key, mixed>  $data  As returned by toArray().
      */
     public static function fromArray(array $data): self
     {
         return new self(
-            method: (string) $data['method'],
-            paidAt: CarbonImmutable::parse((string) $data['paidAt']),
-            amountCents: (int) $data['amountCents'],
+            method: (string) Payload::required($data, 'method', 'payment data'),
+            paidAt: CarbonImmutable::parse((string) Payload::required($data, 'paidAt', 'payment data')),
+            amountCents: (int) Payload::required($data, 'amountCents', 'payment data'),
             notes: isset($data['notes']) ? (string) $data['notes'] : null,
         );
     }

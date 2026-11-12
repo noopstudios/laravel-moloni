@@ -5,6 +5,7 @@ namespace Noop\Moloni\Data;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use InvalidArgumentException;
+use Noop\Moloni\Support\Payload;
 
 /**
  * One line of a document to issue. Moloni ids are resolved from it just before issuing.
@@ -89,15 +90,15 @@ final readonly class InvoiceLine
     }
 
     /**
-     * @param  array<string, mixed>  $data  As returned by toArray().
+     * @param  array<array-key, mixed>  $data  As returned by toArray().
      */
     public static function fromArray(array $data): self
     {
         return new self(
-            name: (string) $data['name'],
-            quantity: (float) $data['quantity'],
-            unitNetPrice: (string) $data['unitNetPrice'],
-            taxRate: (float) $data['taxRate'],
+            name: (string) Payload::required($data, 'name', 'invoice line'),
+            quantity: (float) Payload::required($data, 'quantity', 'invoice line'),
+            unitNetPrice: (string) Payload::required($data, 'unitNetPrice', 'invoice line'),
+            taxRate: (float) Payload::required($data, 'taxRate', 'invoice line'),
             exemptionReason: isset($data['exemptionReason']) ? (string) $data['exemptionReason'] : null,
             reference: isset($data['reference']) ? (string) $data['reference'] : null,
             productId: isset($data['productId']) ? (int) $data['productId'] : null,

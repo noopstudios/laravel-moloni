@@ -1,6 +1,7 @@
 <?php
 
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Noop\Moloni\Data\CustomerData;
 use Noop\Moloni\Data\InvoiceData;
@@ -21,6 +22,14 @@ function idCustomer(): CustomerData
         isBusiness: true,
         createdAt: Carbon::parse('2025-07-04 10:11:12.345678', 'Europe/Lisbon'),
     );
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function idValidData(): array
+{
+    return (new InvoiceData(idCustomer(), [new InvoiceLine('X', 1, '1', 23)]))->toArray();
 }
 
 it('computes the total in cents from lines with five-decimal net prices', function () {
@@ -87,6 +96,20 @@ it('round-trips invoice data through an array', function () {
         ->and($copy->customer->createdAt?->format('Y-m-d H:i:s.u P'))->toBe('2025-07-04 10:11:12.345678 +01:00')
         ->and($copy->totalCents())->toBe($data->totalCents());
 });
+
+it('refuses a frozen payload without a required value', function (Closure $read, string $message) {
+    expect($read)->toThrow(InvalidArgumentException::class, $message);
+})->with([
+    'invoice without customer' => [fn () => InvoiceData::fromArray(Arr::except(idValidData(), 'customer')), 'The frozen invoice data is missing "customer".'],
+    'invoice without lines' => [fn () => InvoiceData::fromArray(Arr::except(idValidData(), 'lines')), 'The frozen invoice data is missing "lines".'],
+    'invoice without currency' => [fn () => InvoiceData::fromArray(Arr::except(idValidData(), 'currency')), 'The frozen invoice data is missing "currency".'],
+    'invoice with a scalar customer' => [fn () => InvoiceData::fromArray(['customer' => 'x'] + idValidData()), 'The frozen invoice data has an invalid "customer".'],
+    'invoice with a scalar line' => [fn () => InvoiceData::fromArray(['lines' => ['x']] + idValidData()), 'The frozen invoice data has an invalid line.'],
+    'customer without key' => [fn () => CustomerData::fromArray(Arr::except(idCustomer()->toArray(), 'key')), 'The frozen customer data is missing "key".'],
+    'line without price' => [fn () => InvoiceLine::fromArray(Arr::except((new InvoiceLine('X', 1, '1', 23))->toArray(), 'unitNetPrice')), 'The frozen invoice line is missing "unitNetPrice".'],
+    'payment without amount' => [fn () => PaymentData::fromArray(Arr::except((new PaymentData('card', now(), 1))->toArray(), 'amountCents')), 'The frozen payment data is missing "amountCents".'],
+    'payment without date' => [fn () => PaymentData::fromArray(Arr::except((new PaymentData('card', now(), 1))->toArray(), 'paidAt')), 'The frozen payment data is missing "paidAt".'],
+]);
 
 it('round-trips customer data without optional fields', function () {
     $customer = new CustomerData('U1', null, null, null, null, null, null);

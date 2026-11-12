@@ -5,6 +5,7 @@ namespace Noop\Moloni\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Carbon;
+use InvalidArgumentException;
 
 /**
  * One document acting on another: a receipt settling an invoice, a credit note crediting it,
@@ -19,7 +20,20 @@ use Illuminate\Support\Carbon;
  */
 class InvoiceDocumentLink extends Model
 {
-    protected $guarded = [];
+    protected $fillable = [
+        'document_id',
+        'associated_document_id',
+        'amount_cents',
+    ];
+
+    protected static function booted(): void
+    {
+        static::saving(function (self $link) {
+            if ($link->amount_cents < 0) {
+                throw new InvalidArgumentException('A document link amount cannot be negative.');
+            }
+        });
+    }
 
     protected function casts(): array
     {

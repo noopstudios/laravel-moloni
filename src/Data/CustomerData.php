@@ -4,6 +4,7 @@ namespace Noop\Moloni\Data;
 
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
+use Noop\Moloni\Support\Payload;
 
 /**
  * The billing customer of a document, as the application knows it.
@@ -51,12 +52,12 @@ final readonly class CustomerData
     }
 
     /**
-     * @param  array<string, mixed>  $data  As returned by toArray().
+     * @param  array<array-key, mixed>  $data  As returned by toArray().
      */
     public static function fromArray(array $data): self
     {
         return new self(
-            key: (string) $data['key'],
+            key: (string) Payload::required($data, 'key', 'customer data'),
             vat: self::nullableString($data['vat'] ?? null),
             name: self::nullableString($data['name'] ?? null),
             email: self::nullableString($data['email'] ?? null),
