@@ -24,6 +24,9 @@ class Order extends Model implements Invoiceable
     /** @var (Closure(self): InvoiceData)|null Replaces the invoice data below; reset it in beforeEach(). */
     public static ?Closure $invoiceDataUsing = null;
 
+    /** @var (Closure(self): string)|null Replaces the invoice reference below; reset in TestCase::setUp(). */
+    public static ?Closure $referenceUsing = null;
+
     public function toInvoiceData(): InvoiceData
     {
         if (self::$invoiceDataUsing !== null) {
@@ -38,6 +41,10 @@ class Order extends Model implements Invoiceable
 
     public function invoiceReference(): string
     {
+        if (self::$referenceUsing !== null) {
+            return (self::$referenceUsing)($this);
+        }
+
         return 'ORDER-'.$this->id;
     }
 

@@ -56,9 +56,7 @@ function pfFake(array $overrides = []): void
             ->push(['valid' => 1, 'document_id' => 6001])
             ->push(['valid' => 1, 'document_id' => 6002]),
         '*/proFormaInvoices/getAll/*' => $recorded(DocumentType::Proforma),
-        '*/invoices/insert/*' => Http::sequence()
-            ->push(['valid' => 1, 'document_id' => 7001])
-            ->push(['valid' => 1, 'document_id' => 7002]),
+        '*/invoices/insert/*' => pfInvoiceInserts(),
         '*/invoiceReceipts/insert/*' => ['valid' => 1, 'document_id' => 7001],
         '*/documents/getOne/*' => fn (Request $request) => Http::response(moloniDocumentRow(['document_id' => $request['document_id']])),
         ...$overrides,
@@ -76,6 +74,37 @@ function pfWith(array $attributes): InvoiceDocument
     $proforma->fill($attributes)->save();
 
     return $proforma;
+}
+
+/**
+ * invoices/insert as Moloni answers it: ids 7001, 7002, …, and an association beyond the
+ * pro-forma's balance (its 123.00 total) refused with code 10.
+ */
+function pfInvoiceInserts(): Closure
+{
+    $nextId = 7001;
+    $associated = [];
+
+    return function (Request $request) use (&$nextId, &$associated) {
+        $data = $request->data();
+        $associations = is_array($data['associated_documents'] ?? null) ? $data['associated_documents'] : [];
+
+        foreach ($associations as $association) {
+            $id = $association['associated_id'];
+            $cents = (int) round($association['value'] * 100);
+
+            if (($associated[$id] ?? 0) + $cents > 12300) {
+                return Http::response([[
+                    ['code' => '10 associated_id', 'description' => 'The associated document is not valid.'],
+                    ['code' => '2 value 0 null null 0 0', 'description' => "Field 'value' must be float, greater or equal to 0, lesser or equal to 0"],
+                ]]);
+            }
+
+            $associated[$id] = ($associated[$id] ?? 0) + $cents;
+        }
+
+        return Http::response(['valid' => 1, 'document_id' => $nextId++]);
+    };
 }
 
 function pfPayment(int $cents = 12300): PaymentData
@@ -122,7 +151,8 @@ it('issues a pro-forma without a payment block and with a 30-day expiration', fu
                 'taxes' => [['tax_id' => 82, 'value' => 23.0, 'order' => 1, 'cumulative' => 0]],
             ]],
         ])
-        ->and(moloniRequests('proFormaInvoices/getAll'))->toHaveCount(1)
+        // Never sent before, so not looked for: its siblings share the reference.
+        ->and(moloniRequests('proFormaInvoices/getAll'))->toHaveCount(0)
         ->and($proforma->type)->toBe(DocumentType::Proforma)
         ->and($proforma->status)->toBe(DocumentStatus::Issued)
         ->and($proforma->document_id)->toBe(6001)
@@ -263,7 +293,7 @@ it('converts a pro-forma into an invoice linked to it', function () {
         ->and($invoice->document_id)->toBe(7001)
         ->and($invoice->expected_total_cents)->toBe($proforma->expected_total_cents)
         ->and($invoice->active_key)->toBe(InvoiceDocument::activeKeyFor($order))
-        ->and($invoice->payload['converts'] ?? null)->toBe(['proforma_document_id' => $proforma->id, 'moloni_document_id' => 6001])
+        ->and($invoice->payload['converts'] ?? null)->toBe(['proforma_document_id' => $proforma->id, 'moloni_document_id' => 6001, 'associate' => true])
         ->and($invoice->links()->sole()->only(['associated_document_id', 'amount_cents']))
         ->toBe(['associated_document_id' => $proforma->id, 'amount_cents' => 12300])
         ->and($proforma->fresh()?->status)->toBe(DocumentStatus::Issued);
@@ -288,13 +318,28 @@ it('converts what the customer was quoted, even when the order changed since', f
     $proforma = pfIssued();
     Order::$invoiceDataUsing = fn (Order $order) => new InvoiceData(
         new CustomerData('C'.$order->id, '501111111', 'Other Lda', null, null, null, null),
-        [new InvoiceLine('Consulting', 2, '100', 23)],
+        [new InvoiceLine('Training', 2, '100', 23)],
     );
-    Queue::fake();
+    Order::$referenceUsing = fn (Order $order) => 'CHANGED-'.$order->id;
 
-    $invoice = Moloni::convert($proforma);
+    $invoice = Moloni::convert($proforma)->refresh();
 
-    expect($invoice->payload['invoice'] ?? null)->toBe($proforma->payload['invoice'] ?? [])
+    $inserts = moloniRequests('invoices/insert');
+    expect($inserts)->toHaveCount(1)
+        ->and($inserts[0]['products'])->toBe([[
+            'product_id' => 900,
+            'name' => 'Consulting',
+            'summary' => '',
+            'qty' => 1.0,
+            'price' => '100',
+            'taxes' => [['tax_id' => 82, 'value' => 23.0, 'order' => 1, 'cumulative' => 0]],
+        ]])
+        ->and($inserts[0]['customer_id'])->toBe(301)
+        ->and($inserts[0]['our_reference'])->toBe('#ORDER-1')
+        ->and(moloniRequests('customers/getByVat')[0]['vat'] ?? null)->toBe('509999999')
+        ->and($invoice->status)->toBe(DocumentStatus::Issued)
+        ->and($invoice->reference)->toBe($proforma->reference)
+        ->and($invoice->payload['invoice'] ?? null)->toBe($proforma->payload['invoice'] ?? [])
         ->and($invoice->expected_total_cents)->toBe(12300)
         ->and($invoice->customer_vat)->toBe('509999999');
 });
@@ -395,25 +440,160 @@ it('leaves a conversion unknown when its insert response is lost', function () {
         ->and(moloniRequests('invoices/insert'))->toHaveCount(1);
 });
 
-it('keeps the association when a converted invoice is reissued', function () {
+it('reissues a converted invoice without associating the pro-forma again in Moloni', function () {
     $proforma = pfIssued();
     $old = Moloni::convert($proforma)->refresh();
     expect($old->document_id)->toBe(7001);
 
+    // The old invoice is not cancelled in Moloni and still holds the pro-forma's balance.
+    $new = Moloni::reissue($old)->refresh();
+
+    $inserts = moloniRequests('invoices/insert');
+    expect($inserts)->toHaveCount(2)
+        ->and($inserts[0]['associated_documents'])->toBe([['associated_id' => 6001, 'value' => 123.0]])
+        ->and($inserts[1]->data())->not->toHaveKey('associated_documents')
+        ->and($old->fresh()?->status)->toBe(DocumentStatus::Superseded)
+        ->and($new->status)->toBe(DocumentStatus::Issued)
+        ->and($new->document_id)->toBe(7002)
+        ->and($new->payload['converts'] ?? null)->toBe(['proforma_document_id' => $proforma->id, 'moloni_document_id' => 6001, 'associate' => false])
+        ->and($new->links()->sole()->associated_document_id)->toBe($proforma->id)
+        ->and($old->links()->sole()->associated_document_id)->toBe($proforma->id);
+
+    // Reissued again, it still does not associate: the first invoice holds the balance.
+    $newer = Moloni::reissue($new)->refresh();
+
+    expect(moloniRequests('invoices/insert'))->toHaveCount(3)
+        ->and(moloniRequests('invoices/insert')[2]->data())->not->toHaveKey('associated_documents')
+        ->and($newer->status)->toBe(DocumentStatus::Issued)
+        ->and($newer->payload['converts']['associate'] ?? null)->toBeFalse();
+});
+
+it('associates the reissue of a conversion that never reached Moloni', function () {
+    $proforma = pfIssued(overrides: ['*/invoices/insert/*' => Http::sequence()
+        ->push('Bad gateway', 502)
+        ->push(['valid' => 1, 'document_id' => 7002])]);
+    $old = Moloni::convert($proforma)->refresh();
+    expect($old->status)->toBe(DocumentStatus::Unknown)
+        ->and($old->document_id)->toBeNull();
+
+    // Reconciliation finds nothing of the old one, so the balance is free.
     $new = Moloni::reissue($old)->refresh();
 
     $inserts = moloniRequests('invoices/insert');
     expect($inserts)->toHaveCount(2)
         ->and($inserts[1]['associated_documents'])->toBe([['associated_id' => 6001, 'value' => 123.0]])
-        ->and($old->fresh()?->status)->toBe(DocumentStatus::Superseded)
         ->and($new->status)->toBe(DocumentStatus::Issued)
         ->and($new->document_id)->toBe(7002)
-        ->and($new->payload['converts'] ?? null)->toBe($old->payload['converts'] ?? [])
-        ->and($new->links()->sole()->associated_document_id)->toBe($proforma->id)
-        ->and($old->links()->count())->toBe(1);
+        ->and($new->payload['converts']['associate'] ?? null)->toBeTrue();
+});
+
+it('keeps a reissued conversion as the pro-forma\'s conversion', function () {
+    $proforma = pfIssued();
+    $old = Moloni::convert($proforma);
+    $new = Moloni::reissue($old);
 
     // The reissued invoice is now the pro-forma's conversion.
     expect(Moloni::convert($proforma)->is($new))->toBeTrue();
+});
+
+it('adopts a conversion whose lost insert landed in Moloni, without inserting it again', function () {
+    $proforma = pfIssued(overrides: [
+        '*/invoices/insert/*' => Http::response('Bad gateway', 502),
+        '*/invoices/getAll/*' => Http::sequence()
+            ->push([])
+            ->push([moloniDocumentRow(['document_id' => 7001, 'document_set_id' => 41, 'our_reference' => '#ORDER-1'])]),
+    ]);
+    $invoice = Moloni::convert($proforma)->refresh();
+    expect($invoice->status)->toBe(DocumentStatus::Unknown);
+
+    runIssueJob($invoice);
+
+    $invoice->refresh();
+    expect($invoice->status)->toBe(DocumentStatus::Issued)
+        ->and($invoice->document_id)->toBe(7001)
+        ->and(moloniRequests('invoices/insert'))->toHaveCount(1)
+        ->and(moloniRequests('invoices/getAll'))->toHaveCount(2);
+});
+
+it('refuses to convert a second pro-forma while the first one\'s conversion is live', function () {
+    $order = Order::create(['customer_vat' => '509999999']);
+    $first = pfIssued($order, 'quote-1');
+    $second = Moloni::proforma($order, 'quote-2')->refresh();
+    $conversion = Moloni::convert($first);
+    Queue::fake();
+
+    $e = catchMoloniException(fn () => Moloni::convert($second));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($second->status)->toBe(DocumentStatus::Issued)
+        ->and(InvoiceDocument::count())->toBe(3)
+        ->and(InvoiceDocumentLink::sole()->document_id)->toBe($conversion->id)
+        ->and(moloniRequests('invoices/insert'))->toHaveCount(1);
+    Queue::assertNothingPushed();
+});
+
+it('refuses a conversion that loses the live slot to a concurrent request', function () {
+    $order = Order::create(['customer_vat' => '509999999']);
+    $proforma = pfIssued($order);
+    Queue::fake();
+    // Another request takes the live slot between the check and the insert.
+    InvoiceDocument::creating(function (InvoiceDocument $document) use ($order) {
+        if ($document->type === DocumentType::Invoice && $document->payload !== null) {
+            InvoiceDocument::factory()->invoice()->for($order, 'invoiceable')->create();
+        }
+    });
+
+    $e = catchMoloniException(fn () => Moloni::convert($proforma));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('Another live document')
+        ->and(InvoiceDocument::count())->toBe(1)
+        ->and(InvoiceDocumentLink::count())->toBe(0);
+    Queue::assertNothingPushed();
+});
+
+it('issues a pro-forma without being blocked by a sibling that landed in Moloni', function () {
+    $order = Order::create(['customer_vat' => '509999999']);
+    pfFake([
+        '*/proFormaInvoices/insert/*' => Http::sequence()
+            ->push('Bad gateway', 502)
+            ->push(['valid' => 1, 'document_id' => 6002]),
+        // The first one landed as 6001 and is recorded nowhere.
+        '*/proFormaInvoices/getAll/*' => [moloniDocumentRow(['document_id' => 6001, 'document_set_id' => 43, 'our_reference' => '#ORDER-1'])],
+    ]);
+    $sibling = Moloni::proforma($order, 'quote-1')->refresh();
+    expect($sibling->status)->toBe(DocumentStatus::Unknown);
+
+    $fresh = Moloni::proforma($order, 'quote-2')->refresh();
+
+    expect($fresh->status)->toBe(DocumentStatus::Issued)
+        ->and($fresh->document_id)->toBe(6002)
+        ->and($sibling->fresh()?->status)->toBe(DocumentStatus::Unknown)
+        ->and(moloniRequests('proFormaInvoices/insert'))->toHaveCount(2);
+
+    // The sibling was sent, so its next run still looks for it and adopts what landed.
+    runIssueJob($sibling);
+
+    expect($sibling->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and($sibling->fresh()?->document_id)->toBe(6001)
+        ->and(moloniRequests('proFormaInvoices/insert'))->toHaveCount(2);
+});
+
+it('adopts a sent pro-forma whose response was lost, without inserting it again', function () {
+    pfFake([
+        '*/proFormaInvoices/insert/*' => Http::response('Bad gateway', 502),
+        '*/proFormaInvoices/getAll/*' => [moloniDocumentRow(['document_id' => 6001, 'document_set_id' => 43, 'our_reference' => '#ORDER-1'])],
+    ]);
+    $proforma = Moloni::proforma(Order::create(['customer_vat' => '509999999']), 'quote-1')->refresh();
+    expect($proforma->status)->toBe(DocumentStatus::Unknown)
+        ->and($proforma->insert_sent_at)->not->toBeNull();
+
+    runIssueJob($proforma);
+
+    expect($proforma->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and($proforma->fresh()?->document_id)->toBe(6001)
+        ->and(moloniRequests('proFormaInvoices/insert'))->toHaveCount(1)
+        ->and(moloniRequests('proFormaInvoices/getAll'))->toHaveCount(1);
 });
 
 it('never counts a pro-forma link against what the invoice owes', function () {

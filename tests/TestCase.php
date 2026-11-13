@@ -22,6 +22,7 @@ abstract class TestCase extends Orchestra
         parent::setUp();
 
         Order::$invoiceDataUsing = null;
+        Order::$referenceUsing = null;
     }
 
     protected function defineEnvironment($app): void

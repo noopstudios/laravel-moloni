@@ -24,6 +24,9 @@ use Noop\Moloni\Support\Vat;
  * - Exactly one, with the row's customer and total: adopted.
  * - Anything else: the row is left Unknown for a person to decide.
  *
+ * A pro-forma whose insert was never sent (insert_sent_at null) is not looked for either: its
+ * siblings share its reference, and it cannot exist in Moloni.
+ *
  * Receipts carry no our_reference in Moloni, so a receipt whose insert was never sent
  * (insert_sent_at null) cannot exist there and is not looked for: it is issued, and Moloni's own
  * balance check refuses an over-allocation. Once sent, it is looked for on the invoices it settles: each invoice is read (documents/getOne) and its reverse associations give the closed
@@ -50,6 +53,12 @@ class ReconcileDocument
     {
         if ($document->type === DocumentType::Receipt) {
             return $this->reconcileReceipt($document);
+        }
+
+        // Pro-formas of one invoiceable share the reference, so one never sent cannot be told
+        // apart from a sibling's document: it cannot exist in Moloni, and is issued.
+        if ($document->type === DocumentType::Proforma && $document->insert_sent_at === null) {
+            return false;
         }
 
         $blocking = array_values(array_filter(

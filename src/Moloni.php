@@ -116,9 +116,11 @@ class Moloni
      * invoiceable's current data) and associated with it in Moloni, which refuses the association
      * once the pro-forma is cancelled or fully converted: the document then fails.
      *
-     * Converting again while the conversion is live returns it. A pro-forma whose conversion
-     * failed or was voided can be converted again; one whose invoiceable has another live invoice
-     * or invoice-receipt cannot.
+     * Converting again while the conversion is live returns it, even with another payment or term;
+     * a truly concurrent second call may instead be refused as being processed (Validation). A
+     * pro-forma whose conversion failed or was voided can be converted again; one whose invoiceable
+     * has another live invoice or invoice-receipt cannot. The document takes the pro-forma's
+     * reference.
      *
      * @throws MoloniException When the pro-forma cannot be converted or the settings cannot issue the document (Validation).
      */
@@ -151,10 +153,11 @@ class Moloni
                     }
 
                     $quoted = InvoiceData::fromArray(Payload::requiredArray($current->payload ?? [], 'invoice', 'pro-forma'));
-                    $attributes = $this->attributes($type, $invoiceable, $payment, $dueInDays, $quoted);
+                    $attributes = $this->attributes($type, $invoiceable, $payment, $dueInDays, $quoted, $current->reference);
                     $attributes['payload']['converts'] = [
                         'proforma_document_id' => $current->id,
                         'moloni_document_id' => (int) $current->document_id,
+                        'associate' => true,
                     ];
                     $document = $this->create($type, $invoiceable, $attributes);
                     $this->linkConversion($document);
@@ -284,11 +287,6 @@ class Moloni
 
         $attributes = $this->attributes($document->type, $invoiceable, $payment, $dueInDays);
 
-        if (is_array($frozen['converts'] ?? null)) {
-            // The new document converts the same pro-forma, with its own link.
-            $attributes['payload']['converts'] = $frozen['converts'];
-        }
-
         $new = $this->whileHolding($document, function () use ($document, $invoiceable, $attributes) {
             try {
                 return $document->getConnection()->transaction(function () use ($document, $invoiceable, $attributes) {
@@ -296,6 +294,17 @@ class Moloni
                     $this->assertReissuable($old);
                     $old->status = DocumentStatus::Superseded;
                     $old->save();
+                    $converts = $old->payload['converts'] ?? null;
+
+                    if (is_array($converts)) {
+                        // The new document converts the same pro-forma, with its own link. Moloni only
+                        // associates it while nothing of the old one can hold the pro-forma's balance:
+                        // an old document with a Moloni id still does (nothing is cancelled there).
+                        $attributes['payload']['converts'] = [
+                            ...$converts,
+                            'associate' => ($converts['associate'] ?? true) !== false && $old->document_id === null,
+                        ];
+                    }
 
                     return tap($this->create($document->type, $invoiceable, $attributes), $this->linkConversion(...));
                 });
@@ -403,7 +412,7 @@ class Moloni
      *
      * @return array<string, mixed>
      */
-    private function attributes(DocumentType $type, Invoiceable $invoiceable, ?PaymentData $payment, int $dueInDays, ?InvoiceData $invoice = null): array
+    private function attributes(DocumentType $type, Invoiceable $invoiceable, ?PaymentData $payment, int $dueInDays, ?InvoiceData $invoice = null, ?string $reference = null): array
     {
         if ($dueInDays < 0) {
             throw new InvalidArgumentException('The term of a document cannot be negative.');
@@ -449,7 +458,7 @@ class Moloni
             'company_id' => $companyId,
             'document_set_id' => $documentSetId,
             // Exactly what is sent to Moloni as our_reference, and searched for when reconciling.
-            'reference' => '#'.$invoiceable->invoiceReference(),
+            'reference' => $reference ?? '#'.$invoiceable->invoiceReference(),
             'currency' => $invoice->currency,
             'expected_total_cents' => $invoice->totalCents(),
             'customer_vat' => Vat::isFinalConsumer($vat) ? null : $vat,
