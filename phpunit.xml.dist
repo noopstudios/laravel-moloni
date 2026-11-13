@@ -43,6 +43,7 @@
         <server name="MOLONI_EMAIL" value="(null)"/>
         <server name="MOLONI_PASSWORD" value="(null)"/>
         <server name="MOLONI_PREFIX" value="(null)"/>
+        <server name="MOLONI_CUSTOMER_UPDATES" value="own"/>
         <server name="MOLONI_BASE_URL" value="https://api.moloni.pt/v1/"/>
         <server name="MOLONI_TIMEOUT" value="15"/>
         <server name="MOLONI_CONNECT_TIMEOUT" value="5"/>

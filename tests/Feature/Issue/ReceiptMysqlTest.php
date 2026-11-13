@@ -49,6 +49,17 @@ function rmyEnv(string $name, string $default = ''): string
 
 const RMY_SKIP = 'Set MOLONI_TEST_MYSQL_DATABASE (see the file header) to run the MySQL interleaving tests.';
 
+const RMY_FORK_SKIP = 'The pcntl and posix extensions are needed to run a second MySQL client in a forked process.';
+
+/**
+ * Whether this PHP can fork the second client of the deadlock and same-key tests (see rmyFork()).
+ */
+function rmyCanFork(): bool
+{
+    return function_exists('pcntl_fork') && function_exists('pcntl_waitpid')
+        && function_exists('posix_kill') && function_exists('posix_getpid');
+}
+
 beforeEach(function () {
     $database = rmyEnv('DATABASE');
 
@@ -284,7 +295,7 @@ it('retries its own transaction when receipts on unrelated invoices deadlock on 
         ->and($receipt->fresh()?->status)->toBe(DocumentStatus::Pending)
         ->and($receipt->links()->sole()->associated_document_id)->toBe($b->id);
     rmyNoOverAllocation();
-})->skip(rmyEnv('DATABASE') === '', RMY_SKIP);
+})->skip(rmyEnv('DATABASE') === '', RMY_SKIP)->skip(! rmyCanFork(), RMY_FORK_SKIP);
 
 it('lets the deadlock reach the caller inside a host transaction, without a receipt', function () {
     [$a, $b] = rmyTwoInvoices();
@@ -305,7 +316,7 @@ it('lets the deadlock reach the caller inside a host transaction, without a rece
         ->and(InvoiceDocument::where('type', DocumentType::Receipt)->where('status', 'pending')->count())->toBe(0)
         ->and(DB::transactionLevel())->toBe(0);
     rmyNoOverAllocation();
-})->skip(rmyEnv('DATABASE') === '', RMY_SKIP);
+})->skip(rmyEnv('DATABASE') === '', RMY_SKIP)->skip(! rmyCanFork(), RMY_FORK_SKIP);
 
 it('returns the receipt another transaction committed under the same key while this one waited', function () {
     $invoice = InvoiceDocument::factory()->invoice()->issued()->create([
@@ -337,4 +348,4 @@ it('returns the receipt another transaction committed under the same key while t
         ->and(InvoiceDocument::where('type', DocumentType::Receipt)->count())->toBe(1);
     Queue::assertNothingPushed();
     rmyNoOverAllocation();
-})->skip(rmyEnv('DATABASE') === '', RMY_SKIP);
+})->skip(rmyEnv('DATABASE') === '', RMY_SKIP)->skip(! rmyCanFork(), RMY_FORK_SKIP);

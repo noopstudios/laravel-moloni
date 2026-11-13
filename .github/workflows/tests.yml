@@ -16,13 +16,29 @@ jobs:
 
     name: PHP ${{ matrix.php }}
 
+    # For the MySQL interleaving tests (tests/Feature/Issue/*MysqlTest.php). The service starts on
+    # every leg, but only the PHP 8.4 leg points the tests at it (see the pest step).
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: laravel_moloni_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: pdo_sqlite, intl
+          extensions: pdo_sqlite, pdo_mysql, pcntl, posix, intl
           coverage: none
 
       - run: composer update --prefer-dist --no-interaction --no-progress
@@ -32,3 +48,10 @@ jobs:
       - run: vendor/bin/phpstan analyse --no-progress
 
       - run: vendor/bin/pest
+        env:
+          # An empty database name skips the MySQL tests, as on a developer machine without MySQL.
+          MOLONI_TEST_MYSQL_DATABASE: ${{ matrix.php == '8.4' && 'laravel_moloni_test' || '' }}
+          MOLONI_TEST_MYSQL_HOST: 127.0.0.1
+          MOLONI_TEST_MYSQL_PORT: 3306
+          MOLONI_TEST_MYSQL_USERNAME: root
+          MOLONI_TEST_MYSQL_PASSWORD: ''
