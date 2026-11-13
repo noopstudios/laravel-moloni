@@ -266,17 +266,22 @@ it('offers a full credit note when Moloni refuses the cancellation', function ()
     ]);
     $document = issuedInvoice();
 
-    Livewire::test(ListInvoiceDocuments::class)
+    $component = Livewire::test(ListInvoiceDocuments::class)
         ->callAction(TestAction::make('cancel')->table($document), ['reason' => 'Order cancelled'])
         ->assertNotified(__('Moloni refused to cancel :document: :reason', ['document' => 'GR/8', 'reason' => 'The associated document is not valid.']))
-        ->assertActionMounted(TestAction::make('creditNote')->table($document))
-        ->callMountedAction()
+        ->assertActionMounted(TestAction::make('creditNote')->table($document));
+    $key = $component->instance()->mountedActions[0]['data']['idempotency_key'] ?? null;
+    expect($key)->toBeString()->toMatch('/^[0-9a-f-]{36}$/');
+
+    $component->callMountedAction()
         ->assertNotified(__('A credit note was requested for this document.'));
 
+    // The credit note was requested under the key generated when its form opened.
     $credit = InvoiceDocument::query()->where('type', DocumentType::CreditNote)->sole();
-    expect($document->fresh()?->status)->toBe(DocumentStatus::Issued)
-        ->and($credit->status)->toBe(DocumentStatus::Pending)
-        ->and($credit->operation_key)->not->toBe('');
+    expect(Moloni::creditNote($document, null, (string) $key)->is($credit))->toBeTrue()
+        ->and(InvoiceDocument::query()->where('type', DocumentType::CreditNote)->count())->toBe(1)
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and($credit->status)->toBe(DocumentStatus::Pending);
     Queue::assertPushed(IssueDocument::class, 1);
 });
 
