@@ -3,7 +3,6 @@
 namespace Noop\Moloni\Actions;
 
 use Brick\Math\BigDecimal;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
@@ -336,7 +335,10 @@ class RequestCreditNote
 
     /**
      * What is still creditable on each line of the locked origin: its quantity less what its live
-     * credit notes (locked here, in ascending id order) credit on it.
+     * credit notes (locked here, in ascending id order) credit on it. They are read with FOR UPDATE
+     * through a join on their links, as InvoiceDocument::outstandingCentsForUpdate() reads receipts:
+     * a subquery on the links (whereHas) would read the snapshot MySQL's REPEATABLE READ took at
+     * the host transaction's first read, and miss a credit note committed since.
      *
      * @return array<int, BigDecimal> Line index => quantity.
      */
@@ -348,11 +350,16 @@ class RequestCreditNote
             $remaining[$index] = self::decimal($line->quantity);
         }
 
-        $live = $this->creditNotesOf($origin)
-            ->whereIn('status', DocumentStatus::live())
-            ->orderBy('id')
+        $live = InvoiceDocument::query()
+            ->select('invoice_documents.*')
+            ->join('invoice_document_links as l', 'l.document_id', '=', 'invoice_documents.id')
+            ->where('l.associated_document_id', $origin->getKey())
+            ->where('invoice_documents.type', DocumentType::CreditNote)
+            ->whereIn('invoice_documents.status', DocumentStatus::live())
+            ->orderBy('invoice_documents.id')
             ->lockForUpdate()
-            ->get();
+            ->get()
+            ->unique('id');
 
         foreach ($live as $credit) {
             foreach (self::creditOf($credit)['lines'] as $line) {
@@ -430,30 +437,23 @@ class RequestCreditNote
     }
 
     /**
-     * Every credit note of the origin, whatever its status.
-     *
-     * @return Builder<InvoiceDocument>
-     */
-    private function creditNotesOf(InvoiceDocument $origin): Builder
-    {
-        return InvoiceDocument::query()
-            ->where('type', DocumentType::CreditNote)
-            ->whereHas('links', fn (Builder $links) => $links->where('associated_document_id', $origin->getKey()));
-    }
-
-    /**
      * Every credit note of a document with the origin's reference in its company, whatever its
      * status: a reissue or a conversion carries the same reference, and two credit notes with
-     * the same reference could be taken for each other when reconciling.
+     * the same reference could be taken for each other when reconciling. Read with FOR UPDATE
+     * through joins (see remaining()) and counted here: PostgreSQL refuses FOR UPDATE on an aggregate.
      */
     private function creditNotesSharingReference(InvoiceDocument $origin): int
     {
-        return InvoiceDocument::query()
-            ->where('type', DocumentType::CreditNote)
-            ->whereHas('links.associatedDocument', fn (Builder $documents) => $documents
-                ->where('reference', $origin->reference)
-                ->where('company_id', $origin->company_id)
-                ->whereIn('type', [DocumentType::Invoice, DocumentType::InvoiceReceipt]))
+        return $origin->getConnection()->table('invoice_document_links', 'l')
+            ->join('invoice_documents as s', 's.id', '=', 'l.document_id')
+            ->join('invoice_documents as o', 'o.id', '=', 'l.associated_document_id')
+            ->where('s.type', DocumentType::CreditNote->value)
+            ->where('o.reference', $origin->reference)
+            ->where('o.company_id', $origin->company_id)
+            ->whereIn('o.type', [DocumentType::Invoice->value, DocumentType::InvoiceReceipt->value])
+            ->lockForUpdate()
+            ->pluck('s.id')
+            ->unique()
             ->count();
     }
 
