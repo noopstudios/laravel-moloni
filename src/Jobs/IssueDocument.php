@@ -122,6 +122,24 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         return Cache::lock('moloni-doc-'.$document->getKey(), self::LOCK_SECONDS);
     }
 
+    /**
+     * Refuses (Validation) to create a document acting on $document while another process holds
+     * its lock, e.g. while it is being cancelled: the caller must already hold the row lock, so a
+     * cancellation that starts later sees what this caller commits.
+     */
+    public static function assertNotHeld(InvoiceDocument $document): void
+    {
+        $lock = self::lockFor($document);
+
+        if (! $lock->get()) {
+            throw new MoloniException(Message::get('The document :reference is being processed; try again in a moment.', [
+                'reference' => $document->document_number ?? $document->reference,
+            ]), FailureType::Validation);
+        }
+
+        $lock->release();
+    }
+
     public function handle(
         MoloniClient $client,
         ReconcileDocument $reconcile,

@@ -4,6 +4,7 @@ namespace Noop\Moloni;
 
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Event;
@@ -341,6 +342,13 @@ class Moloni
                     $converts = $old->payload['converts'] ?? null;
 
                     if (is_array($converts)) {
+                        // Not while the pro-forma is being cancelled (cancel() holds its lock).
+                        $proforma = InvoiceDocument::query()->whereKey((int) Payload::required($converts, 'proforma_document_id', 'conversion'))->lockForUpdate()->first();
+
+                        if ($proforma !== null) {
+                            IssueDocument::assertNotHeld($proforma);
+                        }
+
                         // The new document converts the same pro-forma, with its own link. Moloni only
                         // associates it while nothing of the old one can hold the pro-forma's balance:
                         // an old document with a Moloni id still does (nothing is cancelled there).
@@ -461,10 +469,25 @@ class Moloni
                 }
             }
 
-            $document->fill([
-                'status' => DocumentStatus::Voided,
-                'payload' => [...($document->payload ?? []), 'void' => ['reason' => $reason, 'at' => now()->toIso8601String()]],
-            ])->save();
+            $document->getConnection()->transaction(function () use ($document, $reason) {
+                $current = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
+                $dependants = $this->liveDependants($current);
+
+                // A safety net: writers of dependants refuse while this lock is held, but one that
+                // checked just before may have committed during the call to Moloni.
+                if ($dependants->isNotEmpty()) {
+                    throw new MoloniException(__('Moloni cancelled :document, but :dependants was requested for it meanwhile; check them in Moloni.', [
+                        'document' => $current->document_number ?? $current->reference,
+                        'dependants' => self::describe($dependants),
+                    ]), FailureType::Validation);
+                }
+
+                $current->fill([
+                    'status' => DocumentStatus::Voided,
+                    'payload' => [...($current->payload ?? []), 'void' => ['reason' => $reason, 'at' => now()->toIso8601String()]],
+                ])->save();
+            });
+            $document->refresh();
         });
 
         Event::dispatch(new DocumentVoided($document));
@@ -484,18 +507,36 @@ class Moloni
             throw new MoloniException(__('The document :document was issued for another Moloni company.', ['document' => $label]), FailureType::Validation);
         }
 
-        $dependants = InvoiceDocument::query()
-            ->whereIn('status', DocumentStatus::live())
-            ->whereHas('links', fn (Builder $links) => $links->where('associated_document_id', $document->getKey()))
-            ->orderBy('id')
-            ->get();
+        $dependants = $this->liveDependants($document);
 
         if ($dependants->isNotEmpty()) {
             throw new MoloniException(__('Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.', [
                 'document' => $label,
-                'dependants' => $dependants->map(fn (InvoiceDocument $dependant) => $dependant->type->getLabel().' '.($dependant->document_number ?? $dependant->reference))->implode(', '),
+                'dependants' => self::describe($dependants),
             ]), FailureType::Validation);
         }
+    }
+
+    /**
+     * The live documents acting on this one: receipts and credit notes on it, documents converting it.
+     *
+     * @return Collection<int, InvoiceDocument>
+     */
+    private function liveDependants(InvoiceDocument $document): Collection
+    {
+        return InvoiceDocument::query()
+            ->whereIn('status', DocumentStatus::live())
+            ->whereHas('links', fn (Builder $links) => $links->where('associated_document_id', $document->getKey()))
+            ->orderBy('id')
+            ->get();
+    }
+
+    /**
+     * @param  Collection<int, InvoiceDocument>  $documents
+     */
+    private static function describe(Collection $documents): string
+    {
+        return $documents->map(fn (InvoiceDocument $document) => $document->type->getLabel().' '.($document->document_number ?? $document->reference))->implode(', ');
     }
 
     /**

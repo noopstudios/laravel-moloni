@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Queue;
 use Noop\Moloni\Data\CustomerData;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\InvoiceLine;
+use Noop\Moloni\Data\PaymentData;
 use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Enums\FailureType;
@@ -278,4 +279,70 @@ it('refuses to cancel a document being processed', function () {
     expect(catchMoloniException(fn () => Moloni::cancel($document, 'Order cancelled'))->type)->toBe(FailureType::Validation);
     Http::assertNothingSent();
     $lock->release();
+});
+
+it('refuses a receipt, credit note or conversion while the document is being cancelled', function (DocumentType $type, Closure $request) {
+    Http::fake();
+    Queue::fake();
+    $document = cxIssued($type);
+    $lock = Cache::lock("moloni-doc-{$document->id}", 150);
+    $lock->get();
+
+    $e = catchMoloniException(fn () => $request($document));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('being processed')
+        ->and(InvoiceDocument::count())->toBe(1)
+        ->and(InvoiceDocumentLink::count())->toBe(0);
+    Queue::assertNothingPushed();
+    Http::assertNothingSent();
+    $lock->release();
+
+    // Once the lock is free, the same request goes through.
+    $request($document);
+    expect(InvoiceDocumentLink::count())->toBe(1);
+})->with([
+    'a receipt' => [DocumentType::Invoice, fn (InvoiceDocument $invoice) => Moloni::receipt(Order::create(), [[$invoice, 1000]], new PaymentData('transfer', Carbon::now(), 1000))],
+    'a credit note' => [DocumentType::Invoice, fn (InvoiceDocument $invoice) => Moloni::creditNote($invoice)],
+    'a conversion' => [DocumentType::Proforma, fn (InvoiceDocument $proforma) => Moloni::convert($proforma)],
+]);
+
+it('refuses to reissue a conversion while its pro-forma is being cancelled', function () {
+    Http::fake();
+    Queue::fake();
+    $proforma = cxIssued(DocumentType::Proforma);
+    $invoice = InvoiceDocument::factory()->invoice()->issued()->create([
+        'invoiceable_type' => $proforma->invoiceable_type,
+        'invoiceable_id' => $proforma->invoiceable_id,
+        'company_id' => 5,
+        'document_id' => 8100,
+        'payload' => ['converts' => ['proforma_document_id' => $proforma->id, 'moloni_document_id' => 8001, 'associate' => true]],
+    ]);
+    InvoiceDocumentLink::create(['document_id' => $invoice->id, 'associated_document_id' => $proforma->id, 'amount_cents' => 12300]);
+    $lock = Cache::lock("moloni-doc-{$proforma->id}", 150);
+    $lock->get();
+
+    expect(catchMoloniException(fn () => Moloni::reissue($invoice))->getMessage())->toContain('being processed')
+        ->and($invoice->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and(InvoiceDocument::count())->toBe(2);
+    $lock->release();
+});
+
+it('keeps a document Moloni cancelled when a dependant slipped in meanwhile', function () {
+    $document = cxIssued();
+    cxFake(['*/documents/documentCancel/*' => function () use ($document) {
+        // A receipt whose request checked the lock just before the cancellation took it.
+        cxDependant($document, DocumentType::Receipt, DocumentStatus::Pending);
+
+        return Http::response(['valid' => 1]);
+    }]);
+
+    $e = catchMoloniException(fn () => Moloni::cancel($document, 'Order cancelled'));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('Moloni cancelled GR/8')
+        ->and($e->getMessage())->toContain('#DEP-receipt')
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and($document->fresh()?->payload)->not->toHaveKey('void');
+    Event::assertNotDispatched(DocumentVoided::class);
 });

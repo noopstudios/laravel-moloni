@@ -14,6 +14,7 @@ use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
+use Noop\Moloni\Jobs\IssueDocument;
 use Noop\Moloni\Models\InvoiceDocument;
 use Noop\Moloni\Models\InvoiceDocumentLink;
 use Noop\Moloni\Settings\MoloniSettings;
@@ -315,6 +316,9 @@ class RequestCreditNote
         if ($current->company_id !== $companyId) {
             throw new InvalidArgumentException(Message::get('The document :document belongs to another Moloni company.', ['document' => self::label($current)]));
         }
+
+        // Not while it is being cancelled (Moloni::cancel() holds its lock).
+        IssueDocument::assertNotHeld($current);
 
         return $current;
     }

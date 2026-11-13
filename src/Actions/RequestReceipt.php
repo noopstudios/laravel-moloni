@@ -12,6 +12,7 @@ use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
+use Noop\Moloni\Jobs\IssueDocument;
 use Noop\Moloni\Models\InvoiceDocument;
 use Noop\Moloni\Models\InvoiceDocumentLink;
 use Noop\Moloni\Settings\MoloniSettings;
@@ -298,6 +299,9 @@ class RequestReceipt
         if ($invoices->count() !== count($ids)) {
             throw new InvalidArgumentException(Message::get('Each receipt allocation must be a saved invoice and an amount in cents.'));
         }
+
+        // Not while an invoice is being cancelled (Moloni::cancel() holds its lock).
+        $invoices->each(IssueDocument::assertNotHeld(...));
 
         return $invoices;
     }
