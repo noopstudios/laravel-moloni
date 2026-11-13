@@ -479,7 +479,7 @@ class Moloni
      * Cancels the document in Moloni, or confirms Moloni already shows it cancelled: Moloni
      * refuses to cancel a cancelled document, so a refusal or an uncertain outcome is read back.
      */
-    private function cancelInMoloni(InvoiceDocument $document, int $documentId, string $reason): void
+    protected function cancelInMoloni(InvoiceDocument $document, int $documentId, string $reason): void
     {
         try {
             $this->client->cancel($documentId, $reason);
@@ -817,7 +817,7 @@ class Moloni
         return $invoiceable;
     }
 
-    private function dispatch(InvoiceDocument $document): void
+    protected function dispatch(InvoiceDocument $document): void
     {
         IssueDocument::dispatch($document);
     }

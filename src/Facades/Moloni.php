@@ -8,6 +8,7 @@ use Noop\Moloni\Contracts\Invoiceable;
 use Noop\Moloni\Data\CreditLine;
 use Noop\Moloni\Data\PaymentData;
 use Noop\Moloni\Models\InvoiceDocument;
+use Noop\Moloni\Testing\MoloniFake;
 
 /**
  * @method static InvoiceDocument invoice(Invoiceable $invoiceable, int $dueInDays = 0)
@@ -24,6 +25,17 @@ use Noop\Moloni\Models\InvoiceDocument;
  */
 class Moloni extends Facade
 {
+    /**
+     * Replaces the manager with a fake that issues every request on the spot, without HTTP or the queue.
+     */
+    public static function fake(): MoloniFake
+    {
+        $fake = app(MoloniFake::class);
+        static::swap($fake);
+
+        return $fake;
+    }
+
     protected static function getFacadeAccessor(): string
     {
         return \Noop\Moloni\Moloni::class;
