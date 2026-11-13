@@ -115,7 +115,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
     /**
      * The lock every writer of a document's status takes: this job, Moloni::retry(),
-     * Moloni::reissue() and Moloni::convert() (on the pro-forma).
+     * Moloni::reissue(), Moloni::cancel() and Moloni::convert() (on the pro-forma).
      */
     public static function lockFor(InvoiceDocument $document): Lock
     {

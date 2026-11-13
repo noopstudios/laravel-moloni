@@ -82,6 +82,15 @@ class MoloniClient
     }
 
     /**
+     * Cancels a document (Moloni status 2), with the reason as its observation. Moloni refuses it
+     * (Validation) while another document depends on it.
+     */
+    public function cancel(int $documentId, string $reason): void
+    {
+        $this->connector->write('documents/documentCancel', ['document_id' => $documentId, 'observation' => $reason]);
+    }
+
+    /**
      * A fresh download link (Moloni signs it for a limited time). Never store it.
      */
     public function pdfLink(int $documentId): string

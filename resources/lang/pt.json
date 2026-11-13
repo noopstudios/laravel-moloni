@@ -94,5 +94,10 @@
     "Line :line of :document can be credited by at most :quantity more.": "A linha :line de :document só pode ser creditada em mais :quantity.",
     "A credit line index cannot be negative.": "O índice de uma linha a creditar não pode ser negativo.",
     "The quantity to credit on line :line must be greater than zero.": "A quantidade a creditar na linha :line tem de ser superior a zero.",
-    "The document credited by :reference no longer matches its lines in Moloni.": "O documento creditado por :reference já não corresponde às suas linhas no Moloni."
+    "The document credited by :reference no longer matches its lines in Moloni.": "O documento creditado por :reference já não corresponde às suas linhas no Moloni.",
+    "A cancellation needs a reason.": "Uma anulação precisa de um motivo.",
+    "Moloni refused to cancel :document: :reason": "O Moloni recusou anular :document: :reason",
+    "Only an issued document can be cancelled.": "Só é possível anular um documento emitido.",
+    "The document :document was issued for another Moloni company.": "O documento :document foi emitido para outra empresa do Moloni.",
+    "Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.": "Não é possível anular :document enquanto dependerem dele: :dependants. Anule-os primeiro ou emita uma nota de crédito."
 }

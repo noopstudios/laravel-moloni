@@ -6,7 +6,9 @@ use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\Event;
 use InvalidArgumentException;
+use LogicException;
 use Noop\Moloni\Actions\RequestCreditNote;
 use Noop\Moloni\Actions\RequestReceipt;
 use Noop\Moloni\Contracts\Invoiceable;
@@ -16,6 +18,7 @@ use Noop\Moloni\Data\PaymentData;
 use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Enums\FailureType;
+use Noop\Moloni\Events\DocumentVoided;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Jobs\IssueDocument;
 use Noop\Moloni\Models\InvoiceDocument;
@@ -24,6 +27,7 @@ use Noop\Moloni\Settings\MoloniSettings;
 use Noop\Moloni\Support\Message;
 use Noop\Moloni\Support\Payload;
 use Noop\Moloni\Support\Vat;
+use Throwable;
 
 /**
  * Requests Moloni documents. A request only records a pending row (reading the settings, never
@@ -386,6 +390,118 @@ class Moloni
         });
 
         $this->dispatch($document);
+    }
+
+    /**
+     * Cancels an issued document in Moloni and marks it voided: it no longer counts, frees its
+     * invoiceable's live slot and releases what it settled. Moloni accepts it only while no other
+     * document depends on it, so a live receipt, credit note or conversion on it is refused here
+     * without calling Moloni (cancel those first, or issue a credit note instead). A refusal from
+     * Moloni is Validation with its reason, and nothing is issued in its place.
+     *
+     * Synchronous: Moloni is called while the document's lock is held, never inside a database
+     * transaction (one that rolled back would forget a cancellation Moloni made). An uncertain
+     * outcome is read back; when Moloni does not show it cancelled, the Unknown is rethrown with
+     * the document unchanged, and cancelling again is safe.
+     *
+     * @throws InvalidArgumentException When the reason is empty.
+     * @throws LogicException When called inside a database transaction.
+     * @throws MoloniException When the document cannot be cancelled (Validation) or the outcome is uncertain (Unknown).
+     */
+    public function cancel(InvoiceDocument $document, string $reason): InvoiceDocument
+    {
+        if (trim($reason) === '') {
+            throw new InvalidArgumentException(Message::get('A cancellation needs a reason.'));
+        }
+
+        if ($document->getConnection()->transactionLevel() > 0) {
+            throw new LogicException('Moloni::cancel() calls Moloni, so it cannot run inside a database transaction.');
+        }
+
+        $this->whileHolding($document, function () use ($document, $reason) {
+            // The caller's copy may be stale: the job and the other writers hold this same lock.
+            $document->refresh();
+            $this->assertCancellable($document);
+            $documentId = (int) $document->document_id;
+
+            try {
+                $this->client->cancel($documentId, $reason);
+            } catch (MoloniException $e) {
+                if ($e->type === FailureType::Validation) {
+                    throw new MoloniException(__('Moloni refused to cancel :document: :reason', [
+                        'document' => $document->document_number ?? $document->reference,
+                        'reason' => self::reasonOf($e),
+                    ]), FailureType::Validation, $e->errors);
+                }
+
+                if ($e->type !== FailureType::Unknown || ! $this->cancelledInMoloni($documentId)) {
+                    throw $e;
+                }
+            }
+
+            $document->fill([
+                'status' => DocumentStatus::Voided,
+                'payload' => [...($document->payload ?? []), 'void' => ['reason' => $reason, 'at' => now()->toIso8601String()]],
+            ])->save();
+        });
+
+        Event::dispatch(new DocumentVoided($document));
+
+        return $document;
+    }
+
+    private function assertCancellable(InvoiceDocument $document): void
+    {
+        $label = $document->document_number ?? $document->reference;
+
+        if ($document->status !== DocumentStatus::Issued || $document->document_id === null) {
+            throw new MoloniException(__('Only an issued document can be cancelled.'), FailureType::Validation);
+        }
+
+        if ($document->company_id !== app(MoloniSettings::class)->companyIdOrNull()) {
+            throw new MoloniException(__('The document :document was issued for another Moloni company.', ['document' => $label]), FailureType::Validation);
+        }
+
+        $dependants = InvoiceDocument::query()
+            ->whereIn('status', DocumentStatus::live())
+            ->whereHas('links', fn (Builder $links) => $links->where('associated_document_id', $document->getKey()))
+            ->orderBy('id')
+            ->get();
+
+        if ($dependants->isNotEmpty()) {
+            throw new MoloniException(__('Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.', [
+                'document' => $label,
+                'dependants' => $dependants->map(fn (InvoiceDocument $dependant) => $dependant->type->getLabel().' '.($dependant->document_number ?? $dependant->reference))->implode(', '),
+            ]), FailureType::Validation);
+        }
+    }
+
+    /**
+     * Whether Moloni shows the document cancelled (status 2); false when it cannot be read.
+     */
+    private function cancelledInMoloni(int $documentId): bool
+    {
+        try {
+            $status = $this->client->document($documentId)['status'] ?? null;
+        } catch (Throwable) {
+            return false;
+        }
+
+        return is_numeric($status) && (int) $status === 2;
+    }
+
+    /**
+     * Moloni's error descriptions (already redacted by the connector), or the exception's message.
+     */
+    private static function reasonOf(MoloniException $e): string
+    {
+        $details = collect($e->errors)
+            ->map(fn (mixed $error) => is_array($error) ? ($error['description'] ?? $error['code'] ?? null) : $error)
+            ->filter(fn (mixed $detail) => is_string($detail) && $detail !== '')
+            ->unique()
+            ->implode('; ');
+
+        return $details === '' ? $e->getMessage() : $details;
     }
 
     /**

@@ -14,6 +14,7 @@ use Noop\Moloni\Models\InvoiceDocument;
  * @method static InvoiceDocument invoiceReceipt(Invoiceable $invoiceable, PaymentData $payment)
  * @method static InvoiceDocument receipt(Model $owner, list<array{0: InvoiceDocument, 1: int}> $allocations, PaymentData $payment, ?string $idempotencyKey = null)
  * @method static InvoiceDocument creditNote(InvoiceDocument $document, list<CreditLine>|null $lines = null, ?string $idempotencyKey = null)
+ * @method static InvoiceDocument cancel(InvoiceDocument $document, string $reason)
  * @method static InvoiceDocument reissue(InvoiceDocument $document, ?PaymentData $payment = null, ?int $dueInDays = null)
  * @method static void retry(InvoiceDocument $document)
  * @method static string pdfLink(InvoiceDocument $document)
