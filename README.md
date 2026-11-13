@@ -182,7 +182,7 @@ Notas:
 - `InvoiceData` expõe `netCents()`, `taxCents()` e `totalCents()`; use `$order->toInvoiceData()->totalCents()` para cobrar exatamente o valor que o Moloni vai calcular. Se o total que o Moloni devolver for diferente, o documento fica emitido mas com `error_type = total_mismatch`.
 - A taxa de cada linha tem de ser uma taxa **exata** de um imposto do Moloni da zona fiscal (diferença inferior a 0,001; ex.: `23.0`, `13.0`, `6.0`). Sem imposto com essa taxa, o documento falha com erro de validação.
 - Só se emite em `EUR`; outra moeda falha com erro de validação.
-- Os documentos têm sempre a data de hoje (no fuso da aplicação): nunca se envia uma data futura ao Moloni.
+- Os documentos têm sempre a data de hoje no calendário de Portugal continental (`Europe/Lisbon`), seja qual for o fuso da aplicação: nunca se envia uma data futura ao Moloni. A data do pagamento de uma fatura-recibo ou de um recibo também se conta nesse fuso.
 
 ## Operações
 

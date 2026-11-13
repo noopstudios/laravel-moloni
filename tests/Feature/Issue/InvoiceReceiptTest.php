@@ -507,6 +507,21 @@ it('never inserts when the row changed while the payload was being built', funct
         ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
 });
 
+it('dates the payment in Portugal\'s calendar, whatever the application timezone', function (string $appTimezone, string $paidAt, string $expected) {
+    config(['app.timezone' => $appTimezone]);
+    travelTo(Carbon::parse('2026-07-02 10:00:00', 'UTC'));
+    fakeMoloniIssuing();
+
+    Moloni::invoiceReceipt(Order::create(['customer_vat' => '509999999']), new PaymentData('card', Carbon::parse($paidAt), 12300));
+
+    expect(moloniRequests('invoiceReceipts/insert')[0]['payments'][0]['date'])->toBe($expected);
+})->with([
+    // 23:30 UTC in July is 00:30 of the next day in Lisbon.
+    'UTC, paid late in the evening' => ['UTC', '2026-07-01 23:30:00+00:00', '2026-07-02'],
+    // 00:30 in Madrid is still the previous day in Lisbon.
+    'east of Lisbon, paid just after midnight' => ['Europe/Madrid', '2026-07-02 00:30:00+02:00', '2026-07-01'],
+]);
+
 it('dates the due date on the day the document is issued', function () {
     fakeMoloniIssuing(['*/invoices/insert/*' => ['valid' => 1, 'document_id' => 7001], '*/documents/getOne/*' => moloniDocumentRow(['document_set_id' => 41])]);
     Queue::fake();

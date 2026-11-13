@@ -42,6 +42,9 @@ class Moloni
     /** The width of invoice_documents.operation_key. */
     private const MAX_OPERATION_KEY_LENGTH = 255;
 
+    /** Documents and payments are dated in Portugal's calendar (mainland), as Moloni dates them. */
+    public const TIMEZONE = 'Europe/Lisbon';
+
     public function __construct(
         private readonly MoloniClient $client,
         private readonly RequestReceipt $receipts,
@@ -846,13 +849,12 @@ class Moloni
     }
 
     /**
-     * Today in the application's timezone. Documents are always dated today: Moloni accepts a
-     * future date and then refuses earlier ones for that type in the series.
+     * Today in Portugal's calendar, whatever the application's timezone. Documents are always
+     * dated today: Moloni accepts a future date and then refuses earlier ones for that type in
+     * the series, and refuses a date before the last one it holds.
      */
     public static function today(): CarbonImmutable
     {
-        $timezone = config('app.timezone');
-
-        return CarbonImmutable::now(is_string($timezone) ? $timezone : null)->startOfDay();
+        return CarbonImmutable::now(self::TIMEZONE)->startOfDay();
     }
 }

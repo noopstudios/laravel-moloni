@@ -647,11 +647,10 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
         $methodId = $settings->payment_methods[$payment->method]
             ?? throw new MoloniException(__('The payment method :method is not configured.', ['method' => $payment->method]), FailureType::Validation);
-        $timezone = config('app.timezone');
 
         return [
             'payment_method_id' => $methodId,
-            'date' => CarbonImmutable::instance($payment->paidAt)->setTimezone(is_string($timezone) ? $timezone : 'UTC')->toDateString(),
+            'date' => CarbonImmutable::instance($payment->paidAt)->setTimezone(Moloni::TIMEZONE)->toDateString(),
             'value' => round($document->expected_total_cents / 100, 2),
             ...($payment->notes !== null ? ['notes' => $payment->notes] : []),
         ];

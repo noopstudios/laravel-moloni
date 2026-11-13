@@ -66,7 +66,8 @@ beforeEach(function () {
         'moloni.prefix' => 'SBX',
         'moloni.customer_updates' => 'own',
         'moloni.queue_connection' => 'sync',
-        'app.timezone' => 'Europe/Lisbon',
+        // Not pinned to Lisbon: the package dates documents in Portugal's calendar on its own.
+        'app.timezone' => 'UTC',
     ]);
 
     // Last line of defence: no write leaves for another company or series.

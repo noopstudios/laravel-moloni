@@ -19,7 +19,8 @@ beforeEach(function () {
     Http::preventStrayRequests();
     useIssueSettings();
     Order::$invoiceDataUsing = null;
-    travelTo(Carbon::parse('2026-05-04 23:30:00'));
+    // 23:30 in Lisbon (UTC+1 in May): still the 4th there.
+    travelTo(Carbon::parse('2026-05-04 22:30:00'));
     Event::fake([DocumentIssued::class, DocumentFailed::class]);
 });
 
@@ -48,14 +49,35 @@ it('issues an invoice with the maturity date for 30 days', function () {
         ->and($document?->payload)->toMatchArray(['payment' => null, 'due_in_days' => 30]);
 });
 
-it('dates the document in the application timezone', function () {
-    config(['app.timezone' => 'Europe/Lisbon']);
-    travelTo(Carbon::parse('2026-05-04 23:30:00', 'UTC'));
+it('dates the document in Portugal\'s calendar when the application runs on UTC', function () {
+    // 23:30 UTC in July is already 00:30 of the next day in Lisbon (UTC+1).
+    config(['app.timezone' => 'UTC']);
+    travelTo(Carbon::parse('2026-07-01 23:30:00', 'UTC'));
     fakeMoloniIssuing(['*/documents/getOne/*' => moloniDocumentRow(['document_set_id' => 41])]);
 
-    Moloni::invoice(Order::create(['customer_vat' => '509999999']));
+    $document = Moloni::invoice(Order::create(['customer_vat' => '509999999']), 30);
 
-    expect(moloniRequests('invoices/insert')[0]['date'])->toBe('2026-05-05');
+    expect(Moloni::today()->toDateString())->toBe('2026-07-02')
+        ->and(moloniRequests('invoices/insert')[0]['date'])->toBe('2026-07-02')
+        ->and(moloniRequests('invoices/insert')[0]['expiration_date'])->toBe('2026-08-01')
+        ->and($document->fresh()?->due_at?->toDateString())->toBe('2026-08-01');
+});
+
+it('never dates a document ahead of Lisbon when the application timezone is east of it', function () {
+    // 00:30 in Madrid is still 23:30 of the previous day in Lisbon.
+    config(['app.timezone' => 'Europe/Madrid']);
+    $previous = date_default_timezone_get();
+    date_default_timezone_set('Europe/Madrid');
+    travelTo(Carbon::parse('2026-07-02 00:30:00', 'Europe/Madrid'));
+    fakeMoloniIssuing(['*/documents/getOne/*' => moloniDocumentRow(['document_set_id' => 41])]);
+
+    try {
+        Moloni::invoice(Order::create(['customer_vat' => '509999999']));
+    } finally {
+        date_default_timezone_set($previous);
+    }
+
+    expect(moloniRequests('invoices/insert')[0]['date'])->toBe('2026-07-01');
 });
 
 it('fails with Validation when no maturity date is configured for the term', function () {
