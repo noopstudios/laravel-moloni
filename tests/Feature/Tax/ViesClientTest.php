@@ -58,6 +58,26 @@ it('treats a member state error as unavailable', function (string $userError) {
     expect($result->available)->toBeFalse()->and($result->valid)->toBeNull();
 })->with(['MS_UNAVAILABLE', 'MS_MAX_CONCURRENT_REQ', 'TIMEOUT', 'SERVICE_UNAVAILABLE', 'GLOBAL_MAX_CONCURRENT_REQ']);
 
+it('bounds the configured timeout, so VIES can never hold the checkout without one', function (mixed $configured, int $seconds) {
+    config(['moloni.vies.timeout' => $configured]);
+    $options = [];
+    Http::fake(['*' => function (Request $request, array $sent) use (&$options) {
+        $options = $sent;
+
+        return Http::response(['valid' => true, 'userError' => 'VALID']);
+    }]);
+
+    app(ViesClient::class)->check('DE', '123456789');
+
+    expect($options['timeout'] ?? null)->toBe($seconds)
+        ->and($options['connect_timeout'] ?? null)->toBe($seconds);
+})->with([
+    'as configured' => [5, 5],
+    'zero, which would mean no timeout' => [0, 1],
+    'too long' => [60, 10],
+    'not a number' => ['soon', 10],
+]);
+
 it('treats a timeout as unavailable, not invalid', function () {
     Http::fake(['*' => fn () => throw new ConnectionException('cURL error 28: timed out')]);
 

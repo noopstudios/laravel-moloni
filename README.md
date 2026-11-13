@@ -72,7 +72,7 @@ As credenciais e as opções são lidas por `config/moloni.php`.
 | `MOLONI_PROFORMA_VALID_DAYS` | `30` | Dias de validade de uma pró-forma (a sua data de validade no Moloni). |
 | `MOLONI_VIES_ENABLED` | `false` | Liga a validação de NIF intracomunitários no VIES (ver [IVA](#iva-regras-de-imposto-e-vies)). |
 | `MOLONI_VIES_URL` | `https://ec.europa.eu/taxation_customs/vies/rest-api` | URL base da API REST do VIES. |
-| `MOLONI_VIES_TIMEOUT` | `5` | Timeout, em segundos, dos pedidos ao VIES. |
+| `MOLONI_VIES_TIMEOUT` | `5` | Timeout, em segundos, dos pedidos ao VIES, mantido entre 1 e 10. |
 
 Duas opções de `config/moloni.php` não vêm do `.env`: `tax_rule` (a classe que decide o IVA, ver abaixo) e `permissions` (ver [Permissões](#permissões)).
 

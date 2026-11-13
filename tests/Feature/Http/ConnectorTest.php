@@ -306,6 +306,8 @@ it('never classifies a failed read as Unknown', function (mixed $body, int $stat
 })->with([
     'html body' => ['<html>oops</html>', 200, FailureType::Transient],
     'too many requests' => [['error' => 'Too Many Requests'], 429, FailureType::Transient],
+    'request timeout' => [['error' => 'Request Timeout'], 408, FailureType::Transient],
+    'too early' => [['error' => 'Too Early'], 425, FailureType::Transient],
     'bad request' => [['error' => 'Bad Request', 'error_description' => 'Bad Request'], 400, FailureType::Validation],
 ]);
 

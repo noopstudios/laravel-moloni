@@ -4,6 +4,7 @@ namespace Noop\Moloni\Tax;
 
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Http;
+use Noop\Moloni\Http\MoloniConnector;
 use Throwable;
 
 /**
@@ -12,6 +13,9 @@ use Throwable;
  */
 class ViesClient
 {
+    /** Seconds; a larger moloni.vies.timeout is capped to this. */
+    private const MAX_TIMEOUT = 10;
+
     /** VIES answers that mean "could not check", as opposed to a definitive VALID or INVALID. */
     private const UNAVAILABLE = [
         'MS_UNAVAILABLE',
@@ -29,7 +33,8 @@ class ViesClient
     {
         $country = strtoupper($countryCode);
         $viesCountry = $country === 'GR' ? 'EL' : $country;
-        $timeout = (int) config('moloni.vies.timeout', 5);
+        // Bounded as Moloni's: zero would mean no timeout at checkout.
+        $timeout = MoloniConnector::seconds(config('moloni.vies.timeout', 5), self::MAX_TIMEOUT);
 
         try {
             $response = Http::timeout($timeout)

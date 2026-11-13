@@ -166,8 +166,9 @@ class MoloniConnector
         }
 
         if (! $response->successful() || ! is_array($body)) {
-            // A read never changes anything, so it is never Unknown: a refused read is Validation, the rest can be retried.
-            $type = $response->clientError() && $response->status() !== 429 ? FailureType::Validation : FailureType::Transient;
+            // A read never changes anything, so it is never Unknown: a refused read is Validation, the
+            // rest (a timeout, "too early", rate limiting included) can be retried.
+            $type = $response->clientError() && ! in_array($response->status(), [408, 425, 429], true) ? FailureType::Validation : FailureType::Transient;
 
             throw new MoloniException("Moloni returned an unexpected response for {$endpoint}.", $type);
         }
