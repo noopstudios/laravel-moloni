@@ -14,6 +14,9 @@ use Noop\Moloni\Http\MoloniConnector;
  */
 class MoloniClient
 {
+    /** Moloni's pro-forma endpoint (undocumented, document type 13), settled in the sandbox over `estimates`. */
+    public const PROFORMA_ENDPOINT = 'proFormaInvoices';
+
     public function __construct(private readonly MoloniConnector $connector) {}
 
     /**
@@ -119,7 +122,7 @@ class MoloniClient
     private function endpoint(DocumentType $type): string
     {
         return match ($type) {
-            DocumentType::Proforma => 'proFormaInvoices',
+            DocumentType::Proforma => self::PROFORMA_ENDPOINT,
             DocumentType::Invoice => 'invoices',
             DocumentType::InvoiceReceipt => 'invoiceReceipts',
             DocumentType::Receipt => 'receipts',

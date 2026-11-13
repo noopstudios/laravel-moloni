@@ -3,11 +3,13 @@
 namespace Noop\Moloni;
 
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\UniqueConstraintViolationException;
 use InvalidArgumentException;
 use Noop\Moloni\Actions\RequestReceipt;
 use Noop\Moloni\Contracts\Invoiceable;
+use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\PaymentData;
 use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
@@ -15,7 +17,10 @@ use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Jobs\IssueDocument;
 use Noop\Moloni\Models\InvoiceDocument;
+use Noop\Moloni\Models\InvoiceDocumentLink;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Support\Message;
+use Noop\Moloni\Support\Payload;
 use Noop\Moloni\Support\Vat;
 
 /**
@@ -26,6 +31,9 @@ class Moloni
 {
     /** The only currency the package issues in for now. */
     private const CURRENCY = 'EUR';
+
+    /** The width of invoice_documents.operation_key. */
+    private const MAX_OPERATION_KEY_LENGTH = 255;
 
     public function __construct(
         private readonly MoloniClient $client,
@@ -54,6 +62,115 @@ class Moloni
     public function invoiceReceipt(Invoiceable $invoiceable, PaymentData $payment): InvoiceDocument
     {
         return $this->request(DocumentType::InvoiceReceipt, $invoiceable, $payment, 0);
+    }
+
+    /**
+     * A pro-forma, valid for `moloni.proforma_valid_days` days: not a fiscal invoice, and an
+     * invoiceable may have several. The same $idempotencyKey returns the same pro-forma, whatever
+     * its status; a failed one is sent again, as retry() does. A new pro-forma needs a new key.
+     *
+     * @throws InvalidArgumentException When the key is empty or too long.
+     * @throws MoloniException When the settings cannot issue a pro-forma (Validation).
+     */
+    public function proforma(Invoiceable $invoiceable, string $idempotencyKey): InvoiceDocument
+    {
+        if (trim($idempotencyKey) === '') {
+            throw new InvalidArgumentException(Message::get('A pro-forma idempotency key cannot be empty.'));
+        }
+
+        $model = $this->model($invoiceable);
+        $operationKey = InvoiceDocument::operationKey(DocumentType::Proforma, $model, $idempotencyKey);
+
+        if (strlen($operationKey) > self::MAX_OPERATION_KEY_LENGTH) {
+            throw new InvalidArgumentException(Message::get('The pro-forma idempotency key is too long.'));
+        }
+
+        $existing = InvoiceDocument::query()->where('operation_key', $operationKey)->first();
+
+        if ($existing !== null) {
+            if ($existing->status === DocumentStatus::Failed) {
+                $this->retry($existing);
+            }
+
+            return $existing;
+        }
+
+        $validDays = config('moloni.proforma_valid_days', 30);
+        $attributes = $this->attributes(DocumentType::Proforma, $invoiceable, null, is_numeric($validDays) ? (int) $validDays : 30);
+
+        try {
+            $document = $model->getConnection()->transaction(fn () => $this->create(DocumentType::Proforma, $invoiceable, $attributes, $operationKey));
+        } catch (UniqueConstraintViolationException $e) {
+            // A concurrent request with the same key created it first.
+            return InvoiceDocument::query()->where('operation_key', $operationKey)->first() ?? throw $e;
+        }
+
+        $this->dispatch($document);
+
+        return $document;
+    }
+
+    /**
+     * Converts an issued pro-forma into an invoice due in $dueInDays days or, with $payment, an
+     * invoice-receipt, built from what the pro-forma quoted (its frozen request, not the
+     * invoiceable's current data) and associated with it in Moloni, which refuses the association
+     * once the pro-forma is cancelled or fully converted: the document then fails.
+     *
+     * Converting again while the conversion is live returns it. A pro-forma whose conversion
+     * failed or was voided can be converted again; one whose invoiceable has another live invoice
+     * or invoice-receipt cannot.
+     *
+     * @throws MoloniException When the pro-forma cannot be converted or the settings cannot issue the document (Validation).
+     */
+    public function convert(InvoiceDocument $proforma, ?PaymentData $payment = null, int $dueInDays = 0): InvoiceDocument
+    {
+        // The job updates the row, so the caller's copy may be stale.
+        $proforma->refresh();
+        $this->assertConvertible($proforma);
+        $invoiceable = $proforma->invoiceable;
+
+        if (! $invoiceable instanceof Invoiceable) {
+            throw new MoloniException(__('The pro-forma :reference has no invoiceable to convert it for.', ['reference' => $proforma->reference]), FailureType::Validation);
+        }
+
+        $type = $payment === null ? DocumentType::Invoice : DocumentType::InvoiceReceipt;
+
+        [$document, $created] = $this->whileHolding($proforma, function () use ($proforma, $invoiceable, $type, $payment, $dueInDays) {
+            try {
+                return $proforma->getConnection()->transaction(function () use ($proforma, $invoiceable, $type, $payment, $dueInDays) {
+                    $current = InvoiceDocument::query()->whereKey($proforma->getKey())->lockForUpdate()->firstOrFail();
+                    $this->assertConvertible($current);
+                    $conversion = $this->conversionOf($current);
+
+                    if ($conversion !== null) {
+                        return [$conversion, false];
+                    }
+
+                    if ($this->live($this->model($invoiceable)) !== null) {
+                        throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $current->reference]), FailureType::Validation);
+                    }
+
+                    $quoted = InvoiceData::fromArray(Payload::requiredArray($current->payload ?? [], 'invoice', 'pro-forma'));
+                    $attributes = $this->attributes($type, $invoiceable, $payment, $dueInDays, $quoted);
+                    $attributes['payload']['converts'] = [
+                        'proforma_document_id' => $current->id,
+                        'moloni_document_id' => (int) $current->document_id,
+                    ];
+                    $document = $this->create($type, $invoiceable, $attributes);
+                    $this->linkConversion($document);
+
+                    return [$document, true];
+                });
+            } catch (UniqueConstraintViolationException) {
+                throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $proforma->reference]), FailureType::Validation);
+            }
+        });
+
+        if ($created) {
+            $this->dispatch($document);
+        }
+
+        return $document;
     }
 
     /**
@@ -114,6 +231,11 @@ class Moloni
 
         $attributes = $this->attributes($document->type, $invoiceable, $payment, $dueInDays);
 
+        if (is_array($frozen['converts'] ?? null)) {
+            // The new document converts the same pro-forma, with its own link.
+            $attributes['payload']['converts'] = $frozen['converts'];
+        }
+
         $new = $this->whileHolding($document, function () use ($document, $invoiceable, $attributes) {
             try {
                 return $document->getConnection()->transaction(function () use ($document, $invoiceable, $attributes) {
@@ -122,7 +244,7 @@ class Moloni
                     $old->status = DocumentStatus::Superseded;
                     $old->save();
 
-                    return $this->create($document->type, $invoiceable, $attributes);
+                    return tap($this->create($document->type, $invoiceable, $attributes), $this->linkConversion(...));
                 });
             } catch (UniqueConstraintViolationException) {
                 throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $document->reference]), FailureType::Validation);
@@ -232,7 +354,7 @@ class Moloni
      *
      * @return array<string, mixed>
      */
-    private function attributes(DocumentType $type, Invoiceable $invoiceable, ?PaymentData $payment, int $dueInDays): array
+    private function attributes(DocumentType $type, Invoiceable $invoiceable, ?PaymentData $payment, int $dueInDays, ?InvoiceData $invoice = null): array
     {
         if ($dueInDays < 0) {
             throw new InvalidArgumentException('The term of a document cannot be negative.');
@@ -244,7 +366,7 @@ class Moloni
         $documentSetId = $settings->document_sets[$type->value]
             ?? throw new MoloniException(__('No document set is configured for :type.', ['type' => $type->getLabel()]), FailureType::Validation);
 
-        $invoice = $invoiceable->toInvoiceData();
+        $invoice ??= $invoiceable->toInvoiceData();
 
         if ($invoice->currency !== self::CURRENCY) {
             throw new MoloniException(__('Cannot issue in :currency: currency not supported yet.', ['currency' => $invoice->currency]), FailureType::Validation);
@@ -283,6 +405,7 @@ class Moloni
             'expected_total_cents' => $invoice->totalCents(),
             'customer_vat' => Vat::isFinalConsumer($vat) ? null : $vat,
             'due_at' => self::today()->addDays($dueInDays),
+            'vies' => $invoice->vies?->toArray(),
             'payload' => [
                 'invoice' => $invoice->toArray(),
                 'payment' => $payment?->toArray(),
@@ -294,19 +417,19 @@ class Moloni
     /**
      * @param  array<string, mixed>  $attributes
      */
-    private function create(DocumentType $type, Invoiceable $invoiceable, array $attributes): InvoiceDocument
+    private function create(DocumentType $type, Invoiceable $invoiceable, array $attributes, ?string $operationKey = null): InvoiceDocument
     {
         $model = $this->model($invoiceable);
-        $previous = InvoiceDocument::query()
+        $operationKey ??= InvoiceDocument::operationKey($type, $model, InvoiceDocument::query()
             ->where('invoiceable_type', $model->getMorphClass())
             ->where('invoiceable_id', $model->getKey())
             ->whereIn('type', [DocumentType::Invoice, DocumentType::InvoiceReceipt])
-            ->count();
+            ->count() + 1);
 
         $document = new InvoiceDocument([
             ...$attributes,
             'type' => $type,
-            'operation_key' => InvoiceDocument::operationKey($type, $model, $previous + 1),
+            'operation_key' => $operationKey,
         ]);
         $document->invoiceable()->associate($model);
         $document->save();
@@ -321,11 +444,55 @@ class Moloni
 
     private function assertReissuable(InvoiceDocument $document): void
     {
+        if ($document->type === DocumentType::Proforma) {
+            throw new MoloniException(__('A pro-forma cannot be reissued; request a new one with a new key instead.'), FailureType::Validation);
+        }
+
         $reissuable = in_array($document->type, [DocumentType::Invoice, DocumentType::InvoiceReceipt], true)
             && in_array($document->status, [DocumentStatus::Issued, DocumentStatus::Unknown], true);
 
         if (! $reissuable) {
             throw new MoloniException(__('Only an issued or unconfirmed invoice or invoice-receipt can be reissued.'), FailureType::Validation);
+        }
+    }
+
+    private function assertConvertible(InvoiceDocument $proforma): void
+    {
+        if ($proforma->type !== DocumentType::Proforma || $proforma->status !== DocumentStatus::Issued || $proforma->document_id === null) {
+            throw new MoloniException(__('Only an issued pro-forma can be converted.'), FailureType::Validation);
+        }
+
+        if ($proforma->company_id !== app(MoloniSettings::class)->companyIdOrNull()) {
+            throw new MoloniException(__('The pro-forma :reference was issued for another Moloni company.', ['reference' => $proforma->reference]), FailureType::Validation);
+        }
+    }
+
+    /**
+     * The live invoice or invoice-receipt converting the pro-forma, if any.
+     */
+    private function conversionOf(InvoiceDocument $proforma): ?InvoiceDocument
+    {
+        return InvoiceDocument::query()
+            ->whereIn('type', [DocumentType::Invoice, DocumentType::InvoiceReceipt])
+            ->whereIn('status', DocumentStatus::live())
+            ->whereHas('links', fn (Builder $links) => $links->where('associated_document_id', $proforma->getKey()))
+            ->first();
+    }
+
+    /**
+     * Links a document converting a pro-forma to it, for its total: it does not settle the
+     * pro-forma (only receipts and credit notes settle debt).
+     */
+    private function linkConversion(InvoiceDocument $document): void
+    {
+        $converts = $document->payload['converts'] ?? null;
+
+        if (is_array($converts)) {
+            InvoiceDocumentLink::create([
+                'document_id' => $document->id,
+                'associated_document_id' => (int) Payload::required($converts, 'proforma_document_id', 'conversion'),
+                'amount_cents' => $document->expected_total_cents,
+            ]);
         }
     }
 

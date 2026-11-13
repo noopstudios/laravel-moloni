@@ -112,8 +112,8 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
     }
 
     /**
-     * The lock every writer of a document's status takes: this job, Moloni::retry() and
-     * Moloni::reissue().
+     * The lock every writer of a document's status takes: this job, Moloni::retry(),
+     * Moloni::reissue() and Moloni::convert() (on the pro-forma).
      */
     public static function lockFor(InvoiceDocument $document): Lock
     {
@@ -413,7 +413,9 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             throw new MoloniException(__("The document total changes with Moloni's tax rates: line tax rates must match Moloni's rates exactly."), FailureType::Validation);
         }
 
-        $maturityDateId = $settings->maturity_dates[$dueInDays] ?? null;
+        // A pro-forma's term is its validity, not a payment term.
+        $maturityDateId = $document->type === DocumentType::Proforma ? null : ($settings->maturity_dates[$dueInDays] ?? null);
+        $converts = is_array($frozen['converts'] ?? null) ? $frozen['converts'] : null;
 
         if ($maturityDateId === null && $document->type === DocumentType::Invoice) {
             throw new MoloniException(__('No maturity date is configured for :days days.', ['days' => $dueInDays]), FailureType::Validation);
@@ -431,6 +433,12 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             'status' => 1,
             ...($invoice->notes !== null ? ['notes' => $invoice->notes] : []),
             'products' => $lines,
+            // A conversion: Moloni refuses it once the pro-forma is cancelled or fully converted,
+            // and the document then fails; it is never sent without the association.
+            ...($converts !== null ? ['associated_documents' => [[
+                'associated_id' => (int) Payload::required($converts, 'moloni_document_id', 'conversion'),
+                'value' => round($document->expected_total_cents / 100, 2),
+            ]]] : []),
             ...($document->type === DocumentType::InvoiceReceipt ? ['payments' => [$this->payment($document, $payment, $settings)]] : []),
         ];
     }

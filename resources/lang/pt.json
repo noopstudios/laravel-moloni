@@ -71,5 +71,11 @@
     "non-EU consumer": "consumidor fora da UE",
     "The receipt key :key already belongs to another receipt; use a new key.": "A chave de recibo :key já pertence a outro recibo; use uma chave nova.",
     "A receipt can settle at most :max invoices.": "Um recibo pode liquidar no máximo :max faturas.",
-    "The invoice :invoice has no Moloni customer.": "A fatura :invoice não tem cliente do Moloni."
+    "The invoice :invoice has no Moloni customer.": "A fatura :invoice não tem cliente do Moloni.",
+    "A pro-forma idempotency key cannot be empty.": "A chave de idempotência de uma fatura pró-forma não pode estar vazia.",
+    "The pro-forma idempotency key is too long.": "A chave de idempotência da fatura pró-forma é demasiado longa.",
+    "The pro-forma :reference has no invoiceable to convert it for.": "A fatura pró-forma :reference não tem origem para a qual possa ser convertida.",
+    "Only an issued pro-forma can be converted.": "Só é possível converter uma fatura pró-forma emitida.",
+    "The pro-forma :reference was issued for another Moloni company.": "A fatura pró-forma :reference foi emitida para outra empresa do Moloni.",
+    "A pro-forma cannot be reissued; request a new one with a new key instead.": "Não é possível reemitir uma fatura pró-forma; peça uma nova com uma chave nova."
 }
