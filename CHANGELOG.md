@@ -33,4 +33,4 @@ The sandbox suite (`vendor/bin/pest --group=sandbox`) checks the package against
 
 - PHP `^8.3`, Laravel `^13.0`, spatie/laravel-settings `^3.0`; Filament `^5.0` only for the panel (optional).
 - MySQL/MariaDB. Concurrent receipts and credit notes rely on InnoDB locking; PostgreSQL under `REPEATABLE READ` or `SERIALIZABLE` host transactions is not supported for receipts.
-- Licence: not decided yet.
+- Licence: MIT.

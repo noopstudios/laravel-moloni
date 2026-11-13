@@ -2,7 +2,7 @@
 
 Pacote Laravel para emitir documentos fiscais no [Moloni](https://www.moloni.pt) a partir de projetos Laravel 13, com um plugin Filament v5 opcional para as definições e para a gestão dos documentos.
 
-> Versão 0.1.0, ainda não publicada. Licença: a definir.
+> Versão 0.1.0, ainda não publicada. Licença: MIT.
 
 ## O que faz
 
@@ -138,6 +138,20 @@ $settings->exemption_reasons = ['eu_business' => 'M40', 'non_eu_business' => 'M4
 $settings->vies_unavailable = 'charge';              // charge ou block
 
 $settings->save();
+```
+
+Para saber os ids sem o ecrã de definições, leia as listas do Moloni com `Noop\Moloni\Catalog\MoloniCatalog` (por exemplo no `tinker`). Grave primeiro o `company_id`: as restantes listas são lidas dessa empresa.
+
+```php
+$catalog = app(\Noop\Moloni\Catalog\MoloniCatalog::class);
+
+$catalog->companies();           // company_id
+$catalog->documentSets();        // document_set_id
+$catalog->paymentMethods();      // payment_method_id
+$catalog->maturityDates();       // maturity_date_id
+$catalog->productCategories();   // category_id
+$catalog->measurementUnits();    // unit_id
+$catalog->taxes();               // tax_id
 ```
 
 ## Implementar `Invoiceable`
@@ -332,7 +346,7 @@ Substitui uma fatura ou fatura-recibo `issued` ou `unknown` por uma nova, constr
 Moloni::retry($document);   // só para documentos "failed"
 ```
 
-Reenvia um documento falhado na mesma linha, com as tentativas a zero. Um recibo ou uma nota de crédito só se reenviam enquanto ainda couberem nos documentos a que se referem.
+Reenvia um documento falhado na mesma linha, com as tentativas a zero. Não devolve nada (tal como `reconcile()`): leia o estado novo com `$document->refresh()`. Um recibo ou uma nota de crédito só se reenviam enquanto ainda couberem nos documentos a que se referem.
 
 ### Reconciliar
 
@@ -457,7 +471,7 @@ it('handles a lost answer', function () {
 
 ## Fila e infraestrutura
 
-- **Ligação de fila `database`** (`MOLONI_QUEUE_CONNECTION`). O job de emissão é sempre enviado para essa ligação, com `afterCommit()` (só sai depois de a transação do pedido ser confirmada). Precisa da tabela `jobs` (`php artisan queue:table`) e de um worker para essa ligação: `php artisan queue:work database`.
+- **Ligação de fila `database`** (`MOLONI_QUEUE_CONNECTION`). O job de emissão é sempre enviado para essa ligação, com `afterCommit()` (só sai depois de a transação do pedido ser confirmada). Precisa da tabela `jobs` (uma aplicação Laravel 13 nova já a tem; senão, `php artisan make:queue-table`) e de um worker para essa ligação: `php artisan queue:work database`.
 - **`retry_after` acima de 120 s.** Em `config/queue.php`, a ligação usada deve ter `retry_after` superior ao timeout do job (120 s), por exemplo 180. Caso contrário um job ainda a correr é entregue a um segundo worker.
 - **O worker tem de respeitar o timeout do job** (120 s): a extensão `pcntl` carregada e o `--timeout` do worker a não o encurtar nem ignorar. Como última guarda, o job nunca envia o documento ao Moloni se já não tiver o lock ou se já corre há mais de 110 s; a linha fica `issuing` e é reconciliada.
 - **Cache partilhada com locks atómicos.** `CACHE_STORE` tem de suportar locks e ser comum a todos os workers e servidores web (`redis`, `database`, `memcached`…): nunca `array` nem `file` por servidor. O lock por documento é o que impede duas execuções simultâneas. Os tokens de acesso do Moloni também ficam nessa cache.
@@ -521,4 +535,4 @@ O ficheiro tem as quatro credenciais (`MOLONI_CLIENT_ID`, `MOLONI_CLIENT_SECRET`
 
 ## Licença
 
-Licença: a definir.
+MIT. Ver [LICENSE](LICENSE).
