@@ -77,5 +77,22 @@
     "The pro-forma :reference has no invoiceable to convert it for.": "A fatura pró-forma :reference não tem origem para a qual possa ser convertida.",
     "Only an issued pro-forma can be converted.": "Só é possível converter uma fatura pró-forma emitida.",
     "The pro-forma :reference was issued for another Moloni company.": "A fatura pró-forma :reference foi emitida para outra empresa do Moloni.",
-    "A pro-forma cannot be reissued; request a new one with a new key instead.": "Não é possível reemitir uma fatura pró-forma; peça uma nova com uma chave nova."
+    "A pro-forma cannot be reissued; request a new one with a new key instead.": "Não é possível reemitir uma fatura pró-forma; peça uma nova com uma chave nova.",
+    "Only an issued invoice or invoice-receipt can be credited.": "Só é possível creditar uma fatura ou fatura-recibo emitida.",
+    "A credit note idempotency key cannot be empty.": "A chave de idempotência de uma nota de crédito não pode estar vazia.",
+    "The credit note idempotency key is too long.": "A chave de idempotência da nota de crédito é demasiado longa.",
+    "Its claim of :applied is more than the :open still open on :document.": "O valor associado de :applied excede os :open ainda em aberto em :document.",
+    "The credit note :reference no longer fits its document: :reason": "A nota de crédito :reference já não é compatível com o seu documento: :reason",
+    "Nothing to credit was requested.": "Não foi pedido nada para creditar.",
+    "Each line to credit must be a CreditLine.": "Cada linha a creditar tem de ser uma CreditLine.",
+    "Line :line appears more than once in the credit note.": "A linha :line aparece mais do que uma vez na nota de crédito.",
+    "The credit note key :key already belongs to another credit note; use a new key.": "A chave :key já pertence a outra nota de crédito; use uma chave nova.",
+    "The document :document belongs to another Moloni company.": "O documento :document pertence a outra empresa do Moloni.",
+    "The document :document has no recorded lines to credit.": "O documento :document não tem linhas registadas para creditar.",
+    "Nothing is left to credit on :document.": "Já não há nada para creditar em :document.",
+    "The document :document has no line :line.": "O documento :document não tem a linha :line.",
+    "Line :line of :document can be credited by at most :quantity more.": "A linha :line de :document só pode ser creditada em mais :quantity.",
+    "A credit line index cannot be negative.": "O índice de uma linha a creditar não pode ser negativo.",
+    "The quantity to credit on line :line must be greater than zero.": "A quantidade a creditar na linha :line tem de ser superior a zero.",
+    "The document credited by :reference no longer matches its lines in Moloni.": "O documento creditado por :reference já não corresponde às suas linhas no Moloni."
 }

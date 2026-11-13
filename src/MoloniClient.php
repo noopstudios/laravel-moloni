@@ -17,6 +17,9 @@ class MoloniClient
     /** Moloni's pro-forma endpoint (undocumented, document type 13), settled in the sandbox over `estimates`. */
     public const PROFORMA_ENDPOINT = 'proFormaInvoices';
 
+    /** Moloni's document_type_id of a credit note. */
+    public const CREDIT_NOTE_TYPE_ID = 3;
+
     public function __construct(private readonly MoloniConnector $connector) {}
 
     /**
@@ -65,12 +68,17 @@ class MoloniClient
      */
     public function findByReference(DocumentType $type, string $reference): array
     {
-        $rows = $this->connector->readAll($this->endpoint($type).'/getAll', ['our_reference' => $reference]);
+        // The our_reference filter is only confirmed on documents/getAll for credit notes, which
+        // lists every type: other types are left out here, a row without a type is kept.
+        $rows = $type === DocumentType::CreditNote
+            ? $this->connector->readAll('documents/getAll', ['our_reference' => $reference])
+            : $this->connector->readAll($this->endpoint($type).'/getAll', ['our_reference' => $reference]);
 
         /** @var list<array<string, mixed>> */
         return array_values(array_filter($rows, fn (mixed $row) => is_array($row)
             && (! is_string($row['our_reference'] ?? null) || $row['our_reference'] === $reference)
-            && (! is_numeric($row['status'] ?? null) || (int) $row['status'] === 1)));
+            && (! is_numeric($row['status'] ?? null) || (int) $row['status'] === 1)
+            && ($type !== DocumentType::CreditNote || ! is_numeric($row['document_type_id'] ?? null) || (int) $row['document_type_id'] === self::CREDIT_NOTE_TYPE_ID)));
     }
 
     /**

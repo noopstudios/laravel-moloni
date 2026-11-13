@@ -290,6 +290,8 @@ class ReconcileDocument
     {
         return is_numeric($row['document_id'] ?? null)
             && is_numeric($row['document_set_id'] ?? null)
+            // Credit notes are looked for among every type: one whose type cannot be read blocks.
+            && ($document->type !== DocumentType::CreditNote || is_numeric($row['document_type_id'] ?? null))
             && $this->sameCustomer($document, $row)
             && MoloniClient::cents($row['net_value'] ?? null) === $document->expected_total_cents;
     }

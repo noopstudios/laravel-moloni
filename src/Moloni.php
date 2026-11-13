@@ -7,8 +7,10 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\UniqueConstraintViolationException;
 use InvalidArgumentException;
+use Noop\Moloni\Actions\RequestCreditNote;
 use Noop\Moloni\Actions\RequestReceipt;
 use Noop\Moloni\Contracts\Invoiceable;
+use Noop\Moloni\Data\CreditLine;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\PaymentData;
 use Noop\Moloni\Enums\DocumentStatus;
@@ -38,6 +40,7 @@ class Moloni
     public function __construct(
         private readonly MoloniClient $client,
         private readonly RequestReceipt $receipts,
+        private readonly RequestCreditNote $credits,
     ) {}
 
     /**
@@ -215,9 +218,41 @@ class Moloni
     }
 
     /**
-     * A failed receipt requested again under its key: sent again as retry() does, unless another
-     * call or run got to it first, in which case the row is returned as it now is. A receipt that
-     * no longer fits what its invoices owe is still refused.
+     * A credit note on an issued invoice or invoice-receipt: $lines (a list of CreditLine, by the
+     * position of the line in the document's request), or with null everything still creditable
+     * on every line. Each line can be credited up to its quantity across all live credit notes.
+     *
+     * The credit note claims at most the document's open balance (what an invoice still owes;
+     * nothing of an invoice-receipt): an unpaid invoice then owes that much less, a paid one is
+     * unaffected. Its reference is the document's followed by "/NC{n}".
+     *
+     * Without $idempotencyKey every call records a new credit note. With it, a repeated call on
+     * the same document with the same lines (or again null) returns the same credit note and sends
+     * a failed one again, as retry() does; other lines under that key are refused. The document is
+     * locked for the transaction, as for receipts, with the same deadlock rules (see receipt()).
+     *
+     * @param  list<CreditLine>|null  $lines
+     *
+     * @throws InvalidArgumentException When the document or the lines cannot be credited.
+     * @throws MoloniException When the settings cannot issue a credit note (Validation).
+     */
+    public function creditNote(InvoiceDocument $document, ?array $lines = null, ?string $idempotencyKey = null): InvoiceDocument
+    {
+        [$credit, $created] = ($this->credits)($document, $lines, $idempotencyKey);
+
+        if ($created) {
+            $this->dispatch($credit);
+        } elseif ($credit->status === DocumentStatus::Failed) {
+            $this->resendRequestedAgain($credit);
+        }
+
+        return $credit;
+    }
+
+    /**
+     * A failed receipt or credit note requested again under its key: sent again as retry() does,
+     * unless another call or run got to it first, in which case the row is returned as it now is.
+     * One that no longer fits its documents is still refused.
      */
     private function resendRequestedAgain(InvoiceDocument $receipt): void
     {
@@ -253,12 +288,17 @@ class Moloni
 
     /**
      * Puts a locked failed row back to Pending with its attempts counted from zero; a receipt only
-     * while its allocations still fit what its invoices owe.
+     * while its allocations still fit what its invoices owe, a credit note only while its lines and
+     * claim still fit its document.
      */
     private function resetForResend(InvoiceDocument $current): void
     {
         if ($current->type === DocumentType::Receipt) {
             $this->receipts->assertStillFits($current);
+        }
+
+        if ($current->type === DocumentType::CreditNote) {
+            $this->credits->assertStillFits($current);
         }
 
         $current->fill(['status' => DocumentStatus::Pending, 'error_type' => null, 'error_message' => null, 'attempts' => 0])->save();
@@ -321,7 +361,8 @@ class Moloni
 
     /**
      * Sends a failed document again, on the same row, with its attempts counted from zero. A
-     * receipt is sent again only while its allocations still fit what its invoices owe.
+     * receipt is sent again only while its allocations still fit what its invoices owe, a credit
+     * note only while its lines and claim still fit its document.
      */
     public function retry(InvoiceDocument $document): void
     {

@@ -2,6 +2,7 @@
 
 namespace Noop\Moloni\Jobs;
 
+use Brick\Math\BigDecimal;
 use Carbon\CarbonImmutable;
 use Illuminate\Bus\Queueable;
 use Illuminate\Cache\Lock as CacheLock;
@@ -17,6 +18,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 use Noop\Moloni\Actions\ReconcileDocument;
+use Noop\Moloni\Actions\RequestCreditNote;
 use Noop\Moloni\Actions\RequestReceipt;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\InvoiceLine;
@@ -240,9 +242,11 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         $today = Moloni::today();
 
         try {
-            $payload = $document->type === DocumentType::Receipt
-                ? $this->receiptPayload($document, $settings, $today)
-                : $this->payload($document, $customers, $taxes, $products, $settings, $today);
+            $payload = match ($document->type) {
+                DocumentType::Receipt => $this->receiptPayload($document, $settings, $today),
+                DocumentType::CreditNote => $this->creditNotePayload($document, $client, $today),
+                default => $this->payload($document, $customers, $taxes, $products, $settings, $today),
+            };
         } catch (MoloniException $e) {
             // The reconciliation just found nothing, so nothing of this document exists in Moloni.
             $this->failBeforeInsert($document, $e, absentInMoloni: true);
@@ -471,6 +475,134 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             'payments' => [$this->payment($document, $payment, $settings)],
             'status' => 1,
         ];
+    }
+
+    /**
+     * A credit note needs no customer, product or tax resolution: it credits lines of a document
+     * Moloni already has. The origin is read from Moloni, each credited line is matched by its
+     * position to the line Moloni stored (which must still be the one requested: same count,
+     * name, quantity and price, and product when the request named it), and is sent with
+     * Moloni's line id (related_id), stored price and taxes. The association claims what the
+     * request fixed (at most the open balance, which Moloni refuses to exceed).
+     *
+     * @return array<string, mixed>
+     */
+    private function creditNotePayload(InvoiceDocument $document, MoloniClient $client, CarbonImmutable $today): array
+    {
+        $credit = RequestCreditNote::creditOf($document);
+        $frozen = InvoiceData::fromArray(Payload::requiredArray($document->payload ?? [], 'invoice', 'credit note'));
+        $originInvoice = InvoiceDocument::query()->find($credit['origin_document_id'])?->payload['invoice'] ?? null;
+        $originLines = is_array($originInvoice) ? InvoiceData::fromArray($originInvoice)->lines : [];
+        $row = $client->document($credit['moloni_document_id']);
+        $stored = $row['products'] ?? null;
+        $customerId = $row['customer_id'] ?? null;
+
+        if (! is_array($stored) || ! array_is_list($stored) || count($stored) !== count($originLines)
+            || ! is_numeric($customerId) || ($document->customer_id !== null && (int) $customerId !== $document->customer_id)) {
+            throw $this->originMismatch($document);
+        }
+
+        $lines = [];
+
+        foreach ($credit['lines'] as $position => $line) {
+            $requested = $originLines[$line['index']] ?? null;
+            $moloni = $stored[$line['index']] ?? null;
+
+            if ($requested === null || ! is_array($moloni) || ! $this->sameLine($requested, $moloni)) {
+                throw $this->originMismatch($document);
+            }
+
+            $lines[] = [
+                'product_id' => (int) $moloni['product_id'],
+                'name' => $requested->name,
+                'qty' => $frozen->lines[$position]->quantity,
+                'price' => (float) $moloni['price'],
+                'related_id' => (int) $moloni['document_product_id'],
+                ...$this->storedTaxes($document, $moloni),
+            ];
+        }
+
+        $document->customer_id = (int) $customerId;
+
+        return [
+            'company_id' => $document->company_id,
+            'date' => $today->toDateString(),
+            'document_set_id' => $document->document_set_id,
+            'customer_id' => (int) $customerId,
+            'our_reference' => $document->reference,
+            'status' => 1,
+            'products' => $lines,
+            'associated_documents' => [[
+                'associated_id' => $credit['moloni_document_id'],
+                'value' => round($credit['applied_cents'] / 100, 2),
+            ]],
+        ];
+    }
+
+    /**
+     * Whether the line Moloni stored is the line the document requested.
+     *
+     * @param  array<array-key, mixed>  $moloni  A line of documents/getOne's products.
+     */
+    private function sameLine(InvoiceLine $requested, array $moloni): bool
+    {
+        $decimal = fn (mixed $value) => BigDecimal::of(is_float($value) ? var_export($value, true) : (string) $value);
+
+        return is_numeric($moloni['document_product_id'] ?? null)
+            && is_numeric($moloni['product_id'] ?? null)
+            && is_numeric($moloni['qty'] ?? null)
+            && is_numeric($moloni['price'] ?? null)
+            && ($moloni['name'] ?? null) === $requested->name
+            && ($requested->productId === null || (int) $moloni['product_id'] === $requested->productId)
+            && $decimal($moloni['qty'])->isEqualTo($decimal($requested->quantity))
+            && $decimal($moloni['price'])->isEqualTo($requested->unitNetPrice);
+    }
+
+    /**
+     * The taxes Moloni stored on the origin's line, or its exemption when it has none.
+     *
+     * @param  array<array-key, mixed>  $moloni
+     * @return array<string, mixed>
+     */
+    private function storedTaxes(InvoiceDocument $document, array $moloni): array
+    {
+        $taxes = $moloni['taxes'] ?? [];
+
+        if (! is_array($taxes)) {
+            throw $this->originMismatch($document);
+        }
+
+        if ($taxes === []) {
+            $reason = $moloni['exemption_reason'] ?? null;
+
+            if (! is_string($reason) || $reason === '') {
+                throw $this->originMismatch($document);
+            }
+
+            return ['taxes' => [], 'exemption_reason' => $reason];
+        }
+
+        $sent = [];
+
+        foreach ($taxes as $tax) {
+            if (! is_array($tax) || ! is_numeric($tax['tax_id'] ?? null) || ! is_numeric($tax['value'] ?? null)) {
+                throw $this->originMismatch($document);
+            }
+
+            $sent[] = [
+                'tax_id' => (int) $tax['tax_id'],
+                'value' => (float) $tax['value'],
+                'order' => is_numeric($tax['order'] ?? null) ? (int) $tax['order'] : count($sent) + 1,
+                'cumulative' => is_numeric($tax['cumulative'] ?? null) ? (int) $tax['cumulative'] : 0,
+            ];
+        }
+
+        return ['taxes' => $sent];
+    }
+
+    private function originMismatch(InvoiceDocument $document): MoloniException
+    {
+        return new MoloniException(Message::get('The document credited by :reference no longer matches its lines in Moloni.', ['reference' => $document->reference]), FailureType::Validation);
     }
 
     /**
