@@ -2,6 +2,7 @@
 
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -11,6 +12,7 @@ use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Events\DocumentFailed;
 use Noop\Moloni\Events\DocumentIssued;
 use Noop\Moloni\Facades\Moloni;
+use Noop\Moloni\Jobs\IssueDocument;
 use Noop\Moloni\Models\InvoiceDocument;
 use Noop\Moloni\Tests\Fixtures\Order;
 
@@ -273,3 +275,87 @@ it('adopts what the reissued unknown document left in Moloni, or issues it once'
         ->and($new->document_id)->toBe($landed ? 7005 : 7001)
         ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount($landed ? 0 : 1);
 })->with(['landed' => [true], 'not landed' => [false]]);
+
+it('reconciles an unknown document on request, adopting what Moloni has', function () {
+    $document = rcUncertain(attributes: ['error_type' => 'ambiguous_reconciliation', 'error_message' => 'Two documents share the reference.']);
+    fakeMoloniIssuing(['*/invoiceReceipts/getAll/*' => [moloniDocumentRow(['document_id' => 7005])]]);
+    Queue::fake();
+
+    Moloni::reconcile($document);
+
+    Queue::assertPushed(IssueDocument::class, fn (IssueDocument $job) => $job->document->is($document));
+    Http::assertNothingSent();
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Unknown)
+        ->and($document->fresh()?->error_type)->toBe('ambiguous_reconciliation');
+
+    runIssueJob($document);
+
+    $document->refresh();
+    expect($document->status)->toBe(DocumentStatus::Issued)
+        ->and($document->document_id)->toBe(7005)
+        ->and($document->error_type)->toBeNull()
+        ->and($document->error_message)->toBeNull()
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+});
+
+it('keeps an unknown document unknown, with its error, when Moloni is still ambiguous or unreadable', function (mixed $response, string $errorType) {
+    $document = rcUncertain(attributes: ['attempts' => 5, 'error_type' => 'ambiguous_reconciliation', 'error_message' => 'Two documents share the reference.']);
+    fakeMoloniIssuing(['*/invoiceReceipts/getAll/*' => $response]);
+
+    Moloni::reconcile($document);
+    runIssueJob($document);
+
+    $document->refresh();
+    expect($document->status)->toBe(DocumentStatus::Unknown)
+        ->and($document->error_type)->toBe($errorType)
+        ->and($document->document_id)->toBeNull()
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
+})->with([
+    'two documents' => [fn () => [moloniDocumentRow(['document_id' => 7005]), moloniDocumentRow(['document_id' => 7006])], 'ambiguous_reconciliation'],
+    'unreadable' => [fn () => Http::response('Unavailable', 503), 'ambiguous_reconciliation'],
+]);
+
+it('issues an unknown document on request once Moloni shows it never landed', function () {
+    $document = rcUncertain();
+    fakeMoloniIssuing();
+
+    Moloni::reconcile($document);
+    runIssueJob($document);
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and($document->fresh()?->document_id)->toBe(7001)
+        ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(1);
+});
+
+it('reconciles on request only an unknown document', function (DocumentStatus $status) {
+    $document = rcUncertain($status);
+    Http::fake();
+
+    expect(catchMoloniException(fn () => Moloni::reconcile($document))->type)->toBe(FailureType::Validation)
+        ->and($document->fresh()?->status)->toBe($status);
+    // Only the job of the original request.
+    Queue::assertPushed(IssueDocument::class, 1);
+    Http::assertNothingSent();
+})->with([DocumentStatus::Pending, DocumentStatus::Issuing, DocumentStatus::Issued, DocumentStatus::Failed, DocumentStatus::Voided]);
+
+it('judges the status to reconcile as stored, not the copy it was given', function () {
+    $document = rcUncertain();
+    $stale = InvoiceDocument::findOrFail($document->id);
+    $document->fill(['status' => DocumentStatus::Issued, 'document_id' => 7005])->save();
+    Http::fake();
+
+    expect(catchMoloniException(fn () => Moloni::reconcile($stale))->type)->toBe(FailureType::Validation);
+    // Only the job of the original request.
+    Queue::assertPushed(IssueDocument::class, 1);
+});
+
+it('refuses to reconcile a document being processed', function () {
+    $document = rcUncertain();
+    $lock = Cache::lock("moloni-doc-{$document->id}", 150);
+    $lock->get();
+
+    expect(catchMoloniException(fn () => Moloni::reconcile($document))->type)->toBe(FailureType::Validation);
+    // Only the job of the original request.
+    Queue::assertPushed(IssueDocument::class, 1);
+    $lock->release();
+});

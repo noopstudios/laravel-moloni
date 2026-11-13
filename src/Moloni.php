@@ -393,6 +393,28 @@ class Moloni
     }
 
     /**
+     * Looks again in Moloni for a document left unknown (its insert may or may not have landed):
+     * the issuing job is dispatched for it, which adopts the document Moloni has, issues it when
+     * Moloni has nothing that could be it, and leaves it unknown, with its error, when the answer
+     * is still ambiguous or cannot be read.
+     *
+     * @throws MoloniException When the document is not unknown, or is being processed (Validation).
+     */
+    public function reconcile(InvoiceDocument $document): void
+    {
+        $this->whileHolding($document, function () use ($document) {
+            // The caller's copy may be stale: the status is checked on the stored row.
+            $document->refresh();
+
+            if ($document->status !== DocumentStatus::Unknown) {
+                throw new MoloniException(__('Only a document awaiting confirmation can be reconciled.'), FailureType::Validation);
+            }
+        });
+
+        $this->dispatch($document);
+    }
+
+    /**
      * Cancels an issued document in Moloni and marks it voided: it no longer counts, frees its
      * invoiceable's live slot and releases what it settled. Moloni accepts it only while no other
      * document depends on it, so a live receipt, credit note or conversion on it is refused here

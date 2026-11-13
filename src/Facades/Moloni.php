@@ -17,6 +17,7 @@ use Noop\Moloni\Models\InvoiceDocument;
  * @method static InvoiceDocument cancel(InvoiceDocument $document, string $reason)
  * @method static InvoiceDocument reissue(InvoiceDocument $document, ?PaymentData $payment = null, ?int $dueInDays = null)
  * @method static void retry(InvoiceDocument $document)
+ * @method static void reconcile(InvoiceDocument $document)
  * @method static string pdfLink(InvoiceDocument $document)
  *
  * @see \Noop\Moloni\Moloni

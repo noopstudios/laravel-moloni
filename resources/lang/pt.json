@@ -99,5 +99,6 @@
     "Moloni refused to cancel :document: :reason": "O Moloni recusou anular :document: :reason",
     "Only an issued document can be cancelled.": "Só é possível anular um documento emitido.",
     "The document :document was issued for another Moloni company.": "O documento :document foi emitido para outra empresa do Moloni.",
-    "Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.": "Não é possível anular :document enquanto dependerem dele: :dependants. Anule-os primeiro ou emita uma nota de crédito."
+    "Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.": "Não é possível anular :document enquanto dependerem dele: :dependants. Anule-os primeiro ou emita uma nota de crédito.",
+    "Only a document awaiting confirmation can be reconciled.": "Só é possível reconciliar um documento por confirmar."
 }

@@ -673,7 +673,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
      * or product write, which the resolvers find on the next attempt) is retried with backoff
      * until the row's last attempt. Giving up fails the row when nothing of it can exist in
      * Moloni (it is Pending, or this run's reconciliation found nothing); otherwise it is left
-     * Unknown.
+     * Unknown, keeping an ambiguous reconciliation's error when it already had one.
      */
     private function failBeforeInsert(InvoiceDocument $document, MoloniException $e, bool $absentInMoloni): void
     {
@@ -684,6 +684,12 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         }
 
         $absent = $absentInMoloni || $document->status === DocumentStatus::Pending;
+
+        if (! $absent && $document->status === DocumentStatus::Unknown && $document->error_type === ReconcileDocument::AMBIGUOUS) {
+            // Still unresolved: what a person must check in Moloni stays on the row.
+            return;
+        }
+
         $this->settle($document, $absent ? DocumentStatus::Failed : DocumentStatus::Unknown, $e->type->value, $this->message($e));
     }
 
