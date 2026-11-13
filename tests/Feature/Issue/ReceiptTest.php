@@ -1,5 +1,7 @@
 <?php
 
+use Illuminate\Bus\UniqueLock;
+use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Event;
@@ -94,23 +96,50 @@ function rpReverse(int $receiptId, float $value, float $net, array $nested = [])
  * Moloni for receipts: receipts/insert answers 9001; documents/getOne answers the invoices (with
  * the reverse documents given per Moloni invoice id) and any receipt (RC/3, total $receiptTotal).
  *
- * @param  array<int, list<array<string, mixed>>>  $reverse
+ * The receipt settles $receiptSettles (Moloni invoice id => euros) for customer $receiptCustomer. A
+ * null in $reverse leaves the invoice's reverse_associated_documents key out.
+ *
+ * @param  array<int, list<array<string, mixed>>|null>  $reverse
  * @param  array<string, mixed>  $overrides
+ * @param  array<int, float>  $receiptSettles
  */
-function rpFakeMoloni(float $receiptTotal, array $reverse = [], array $overrides = []): void
+function rpFakeMoloni(float $receiptTotal, array $reverse = [], array $overrides = [], array $receiptSettles = [8001 => 10.0, 8002 => 20.0], int $receiptCustomer = 301): void
 {
     Http::fake([
         '*/grant/*' => moloniGrant(),
         '*/receipts/insert/*' => ['valid' => 1, 'document_id' => 9001],
-        '*/documents/getOne/*' => function (Request $request) use ($receiptTotal, $reverse) {
+        '*/documents/getOne/*' => function (Request $request) use ($receiptTotal, $reverse, $receiptSettles, $receiptCustomer) {
             $id = (int) $request['document_id'];
 
-            return Http::response($id >= 9000
-                ? moloniDocumentRow(['document_id' => $id, 'document_type_id' => 2, 'document_set_id' => 43, 'document_set_name' => 'RC', 'number' => 3, 'our_reference' => '', 'gross_value' => 0, 'net_value' => $receiptTotal])
-                : moloniDocumentRow(['document_id' => $id, 'document_type_id' => 1, 'document_set_id' => 41, 'our_reference' => '#INV-'.$id, 'reverse_associated_documents' => $reverse[$id] ?? []]));
+            if ($id >= 9000) {
+                return Http::response(moloniDocumentRow([
+                    'document_id' => $id, 'document_type_id' => 2, 'document_set_id' => 43, 'document_set_name' => 'RC', 'number' => 3,
+                    'our_reference' => '', 'customer_id' => $receiptCustomer, 'gross_value' => 0, 'net_value' => $receiptTotal,
+                    'associated_documents' => array_map(fn (int $invoiceId, float $value) => ['associated_id' => $invoiceId, 'value' => $value], array_keys($receiptSettles), $receiptSettles),
+                ]));
+            }
+
+            $invoice = moloniDocumentRow(['document_id' => $id, 'document_type_id' => 1, 'document_set_id' => 41, 'our_reference' => '#INV-'.$id]);
+
+            return Http::response(array_key_exists($id, $reverse) && $reverse[$id] === null
+                ? $invoice
+                : [...$invoice, 'reverse_associated_documents' => $reverse[$id] ?? []]);
         },
         ...$overrides,
     ]);
+}
+
+/**
+ * A pending receipt whose insert was already about to be sent once, now in $status.
+ *
+ * @param  list<array{0: InvoiceDocument, 1: int}>  $allocations
+ */
+function rpSent(array $allocations, DocumentStatus $status = DocumentStatus::Unknown): InvoiceDocument
+{
+    $receipt = rpPending($allocations);
+    $receipt->fill(['status' => $status, 'attempts' => 1, 'insert_sent_at' => now()->subMinutes(20)])->save();
+
+    return $receipt;
 }
 
 it('issues one receipt for three invoices with a value per invoice', function () {
@@ -143,6 +172,7 @@ it('issues one receipt for three invoices with a value per invoice', function ()
         ->and($receipt?->document_id)->toBe(9001)
         ->and($receipt?->document_number)->toBe('RC/3')
         ->and($receipt?->error_type)->toBeNull()
+        ->and($receipt?->insert_sent_at?->toDateTimeString())->toBe('2026-05-04 10:00:00')
         ->and($receipt?->active_key)->toBeNull()
         ->and($receipt?->invoiceable?->is($order))->toBeTrue()
         ->and($receipt?->operation_key)->toBe(InvoiceDocument::operationKey(DocumentType::Receipt, $order, 'payment-77'))
@@ -191,13 +221,13 @@ it('rejects an amount above what an invoice still owes before calling Moloni', f
         ->and(InvoiceDocumentLink::count())->toBe(1);
 });
 
-it('rejects the second of two concurrent receipts that would exceed the outstanding amount', function () {
+it('refuses a later receipt for money a committed pending receipt already takes', function () {
     Http::fake();
     $a = rpInvoice(8001, 12300);
     $b = rpInvoice(8002, 5000);
     $first = rpPending([[$a, 10000], [$b, 5000]]);
 
-    // The second request runs once the first has committed its pending receipt.
+    // A true interleaving of two transactions is in ReceiptMysqlTest (MySQL only).
     expect(fn () => Moloni::receipt(Order::create(), [[$b, 1000]], rpPayment(1000)))
         ->toThrow(InvalidArgumentException::class)
         ->and(fn () => Moloni::receipt(Order::create(), [[$a, 2400]], rpPayment(2400)))
@@ -226,7 +256,17 @@ it('rejects invoices without a Moloni customer', function () {
     $a = rpInvoice(8001, 12300, ['customer_id' => null]);
 
     expect(fn () => Moloni::receipt(Order::create(), [[$a, 12300]], rpPayment(12300)))
-        ->toThrow(InvalidArgumentException::class, 'same Moloni customer');
+        ->toThrow(InvalidArgumentException::class, 'GR/8001 has no Moloni customer');
+});
+
+it('settles at most 25 invoices per receipt', function () {
+    Queue::fake();
+    $allocations = array_map(fn (int $n) => [rpInvoice(8000 + $n, 100), 100], range(1, 26));
+
+    expect(fn () => Moloni::receipt(Order::create(), $allocations, rpPayment(2600)))
+        ->toThrow(InvalidArgumentException::class, 'at most 25 invoices');
+
+    expect(Moloni::receipt(Order::create(), array_slice($allocations, 0, 25), rpPayment(2500))->links()->count())->toBe(25);
 });
 
 it('rejects invoice-receipts and pro-formas as targets', function (Closure $target) {
@@ -423,8 +463,10 @@ it('returns the same receipt for the same idempotency key and refuses other allo
     Queue::assertPushed(IssueDocument::class, 1);
 
     expect(fn () => Moloni::receipt($order, [[$a, 1500], [$b, 1500]], rpPayment(3000), 'payment-1'))
-        ->toThrow(InvalidArgumentException::class, 'payment-1')
+        ->toThrow(InvalidArgumentException::class, 'The receipt key payment-1 already belongs to another receipt; use a new key.')
         ->and(fn () => Moloni::receipt($order, [[$a, 1000]], rpPayment(1000), 'payment-1'))
+        ->toThrow(InvalidArgumentException::class, 'payment-1')
+        ->and(fn () => Moloni::receipt($order, [[$a, 1000], [$b, 2000]], rpPayment(3000, 'card'), 'payment-1'))
         ->toThrow(InvalidArgumentException::class, 'payment-1');
 
     // Without a key, every call is a new receipt.
@@ -463,6 +505,34 @@ it('returns the receipt a concurrent call with the same key committed while this
     Queue::assertPushed(IssueDocument::class, 1);
 });
 
+it('sends a failed receipt again when it is requested again with its key', function () {
+    Http::fake();
+    Queue::fake();
+    $a = rpInvoice(8001, 12300);
+    $order = Order::create();
+    $receipt = Moloni::receipt($order, [[$a, 10000]], rpPayment(10000), 'payment-3');
+    $receipt->fill(['status' => DocumentStatus::Failed, 'error_type' => 'validation', 'attempts' => 1])->save();
+    // The faked queue never ran the first job, which would have released its unique lock.
+    (new UniqueLock(app(CacheRepository::class)))->release(new IssueDocument($receipt));
+
+    $again = Moloni::receipt($order, [[$a, 10000]], rpPayment(10000), 'payment-3');
+
+    expect($again->is($receipt))->toBeTrue()
+        ->and($again->status)->toBe(DocumentStatus::Pending)
+        ->and($again->attempts)->toBe(0)
+        ->and(InvoiceDocument::where('type', DocumentType::Receipt)->count())->toBe(1);
+    Queue::assertPushed(IssueDocument::class, 2);
+
+    $again->fill(['status' => DocumentStatus::Failed])->save();
+    expect(fn () => Moloni::receipt($order, [[$a, 9000]], rpPayment(9000), 'payment-3'))
+        ->toThrow(InvalidArgumentException::class, 'already belongs to another receipt');
+    // Another receipt took the money meanwhile: the failed one is not sent again.
+    rpPending([[$a, 5000]]);
+    expect(catchMoloniException(fn () => Moloni::receipt($order, [[$a, 10000]], rpPayment(10000), 'payment-3'))->type)->toBe(FailureType::Validation)
+        ->and($receipt->fresh()?->status)->toBe(DocumentStatus::Failed);
+    Http::assertNothingSent();
+});
+
 it('refuses an idempotency key that does not fit the operation key', function () {
     Queue::fake();
 
@@ -486,10 +556,7 @@ it('adopts a receipt that already landed in Moloni instead of inserting again', 
         8001 => [rpReverse(9005, 10, 30)],
         8002 => [rpReverse(9005, 20.0, 30), ['document_id' => 9100, 'value' => 0, 'reverse_associated_document' => ['document_id' => 9100, 'document_type_id' => 3, 'document_set_id' => 44, 'status' => 1, 'net_value' => 5]]],
     ]);
-    $a = rpInvoice(8001, 12300);
-    $b = rpInvoice(8002, 5000);
-    $receipt = rpPending([[$a, 1000], [$b, 2000]]);
-    $receipt->fill(['status' => $status, 'attempts' => 1])->save();
+    $receipt = rpSent([[rpInvoice(8001, 12300), 1000], [rpInvoice(8002, 5000), 2000]], $status);
 
     runIssueJob($receipt);
 
@@ -502,14 +569,30 @@ it('adopts a receipt that already landed in Moloni instead of inserting again', 
     Http::assertSent(fn (Request $request) => str_contains($request->url(), '/documents/getOne/') && $request['document_id'] === 8001);
     Http::assertSent(fn (Request $request) => str_contains($request->url(), '/documents/getOne/') && $request['document_id'] === 8002);
     Event::assertDispatched(DocumentIssued::class);
-})->with([DocumentStatus::Pending, DocumentStatus::Issuing, DocumentStatus::Unknown]);
+})->with([
+    'pending again after a failed token request' => [DocumentStatus::Pending],
+    'issuing' => [DocumentStatus::Issuing],
+    'unknown' => [DocumentStatus::Unknown],
+]);
 
-it('blocks the insert when a receipt in Moloni cannot be confirmed as this one', function (array $reverse) {
-    rpFakeMoloni(30, $reverse);
-    $a = rpInvoice(8001, 12300);
-    $b = rpInvoice(8002, 5000);
-    $receipt = rpPending([[$a, 1000], [$b, 2000]]);
-    $receipt->fill(['status' => DocumentStatus::Unknown, 'attempts' => 1])->save();
+it('never looks for, nor adopts, a receipt whose insert was never sent', function () {
+    // Another receipt with the very same amounts landed in Moloni: it is not this one.
+    rpFakeMoloni(30, [8001 => [rpReverse(9005, 10, 30)], 8002 => [rpReverse(9005, 20, 30)]]);
+    $receipt = rpPending([[rpInvoice(8001, 12300), 1000], [rpInvoice(8002, 5000), 2000]]);
+
+    runIssueJob($receipt);
+
+    $receipt->refresh();
+    expect($receipt->status)->toBe(DocumentStatus::Issued)
+        ->and($receipt->document_id)->toBe(9001)
+        ->and($receipt->insert_sent_at?->toDateTimeString())->toBe('2026-05-04 10:00:00')
+        ->and(moloniRequests('receipts/insert'))->toHaveCount(1)
+        ->and(collect(moloniRequests('documents/getOne'))->map(fn (Request $request) => $request['document_id'])->all())->toBe([9001]);
+});
+
+it('blocks the insert when a receipt in Moloni cannot be confirmed as this one', function (array $reverse, array $receiptSettles, int $receiptCustomer) {
+    rpFakeMoloni(30, $reverse, receiptSettles: $receiptSettles, receiptCustomer: $receiptCustomer);
+    $receipt = rpSent([[rpInvoice(8001, 12300), 1000], [rpInvoice(8002, 5000), 2000]]);
 
     runIssueJob($receipt);
 
@@ -521,14 +604,18 @@ it('blocks the insert when a receipt in Moloni cannot be confirmed as this one',
     Event::assertDispatched(DocumentFailed::class);
     Event::assertNotDispatched(DocumentIssued::class);
 })->with([
-    'on one invoice only' => [[8001 => [rpReverse(9005, 10, 30)]]],
-    'another value on one invoice' => [[8001 => [rpReverse(9005, 10, 30)], 8002 => [rpReverse(9005, 19.99, 30)]]],
-    'another total' => [[8001 => [rpReverse(9005, 10, 31)], 8002 => [rpReverse(9005, 20, 31)]]],
-    'two receipts' => [[8001 => [rpReverse(9005, 10, 30)], 8002 => [rpReverse(9006, 20, 30)]]],
-    'two receipts on every invoice' => [[8001 => [rpReverse(9005, 10, 30), rpReverse(9006, 10, 30)], 8002 => [rpReverse(9005, 20, 30), rpReverse(9006, 20, 30)]]],
-    'an unreadable type' => [[8001 => [rpReverse(9005, 10, 30, ['document_type_id' => null])]]],
-    'an unreadable id' => [[8001 => [['value' => 10, 'reverse_associated_document' => ['document_type_id' => 2, 'document_set_id' => 43, 'status' => 1, 'net_value' => 30]]]]],
-    'disagreeing ids' => [[8001 => [rpReverse(9005, 10, 30, ['document_id' => 9006])], 8002 => [rpReverse(9005, 20, 30, ['document_id' => 9006])]]],
+    'on one invoice only' => [[8001 => [rpReverse(9005, 10, 30)]], [8001 => 10.0, 8002 => 20.0], 301],
+    'another value on one invoice' => [[8001 => [rpReverse(9005, 10, 30)], 8002 => [rpReverse(9005, 19.99, 30)]], [8001 => 10.0, 8002 => 20.0], 301],
+    'another total' => [[8001 => [rpReverse(9005, 10, 31)], 8002 => [rpReverse(9005, 20, 31)]], [8001 => 10.0, 8002 => 20.0], 301],
+    'two receipts' => [[8001 => [rpReverse(9005, 10, 30)], 8002 => [rpReverse(9006, 20, 30)]], [8001 => 10.0, 8002 => 20.0], 301],
+    'two receipts on every invoice' => [[8001 => [rpReverse(9005, 10, 30), rpReverse(9006, 10, 30)], 8002 => [rpReverse(9005, 20, 30), rpReverse(9006, 20, 30)]], [8001 => 10.0, 8002 => 20.0], 301],
+    'an unreadable type' => [[8001 => [rpReverse(9005, 10, 30, ['document_type_id' => null])]], [8001 => 10.0, 8002 => 20.0], 301],
+    'an unreadable id' => [[8001 => [['value' => 10, 'reverse_associated_document' => ['document_type_id' => 2, 'document_set_id' => 43, 'status' => 1, 'net_value' => 30]]]], [8001 => 10.0, 8002 => 20.0], 301],
+    'disagreeing ids' => [[8001 => [rpReverse(9005, 10, 30, ['document_id' => 9006])], 8002 => [rpReverse(9005, 20, 30, ['document_id' => 9006])]], [8001 => 10.0, 8002 => 20.0], 301],
+    'no reverse associations on an invoice' => [[8001 => null], [8001 => 10.0, 8002 => 20.0], 301],
+    'the receipt also settles another invoice' => [[8001 => [rpReverse(9005, 10, 30)], 8002 => [rpReverse(9005, 20, 30)]], [8001 => 10.0, 8002 => 20.0, 8099 => 0.0], 301],
+    'the receipt settles other amounts' => [[8001 => [rpReverse(9005, 10, 30)], 8002 => [rpReverse(9005, 20, 30)]], [8001 => 20.0, 8002 => 10.0], 301],
+    'the receipt of another customer' => [[8001 => [rpReverse(9005, 10, 30)], 8002 => [rpReverse(9005, 20, 30)]], [8001 => 10.0, 8002 => 20.0], 302],
 ]);
 
 it('issues when no receipt in Moloni could be this one', function (int $receiptId, array $nested) {
@@ -537,14 +624,13 @@ it('issues when no receipt in Moloni could be this one', function (int $receiptI
         8002 => [rpReverse($receiptId, 20, 30, $nested)],
     ]);
     InvoiceDocument::factory()->receipt()->issued()->create(['company_id' => 5, 'document_id' => 9100]);
-    $a = rpInvoice(8001, 12300);
-    $b = rpInvoice(8002, 5000);
-    $receipt = rpPending([[$a, 1000], [$b, 2000]]);
+    $receipt = rpSent([[rpInvoice(8001, 12300), 1000], [rpInvoice(8002, 5000), 2000]]);
 
     runIssueJob($receipt);
 
     expect($receipt->fresh()?->document_id)->toBe(9001)
         ->and($receipt->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and(moloniRequests('documents/getOne'))->toHaveCount(3)
         ->and(moloniRequests('receipts/insert'))->toHaveCount(1);
 })->with([
     'recorded on another row' => [9100, []],
@@ -553,9 +639,9 @@ it('issues when no receipt in Moloni could be this one', function (int $receiptI
     'a credit note' => [9101, ['document_type_id' => 3]],
 ]);
 
-it('fails a pending receipt when Moloni answers with another invoice', function () {
+it('fails a sent receipt still pending when Moloni answers with another invoice', function () {
     rpFakeMoloni(30, overrides: ['*/documents/getOne/*' => moloniDocumentRow(['document_id' => 1])]);
-    $receipt = rpPending([[rpInvoice(8001, 12300), 1000]]);
+    $receipt = rpSent([[rpInvoice(8001, 12300), 1000]], DocumentStatus::Pending);
 
     runIssueJob($receipt);
 
@@ -566,8 +652,7 @@ it('fails a pending receipt when Moloni answers with another invoice', function 
 
 it('keeps an uncertain receipt and retries later when an invoice cannot be read', function () {
     rpFakeMoloni(30, overrides: ['*/documents/getOne/*' => Http::response('Unavailable', 503)]);
-    $receipt = rpPending([[rpInvoice(8001, 12300), 1000]]);
-    $receipt->fill(['status' => DocumentStatus::Unknown, 'attempts' => 1])->save();
+    $receipt = rpSent([[rpInvoice(8001, 12300), 1000]]);
 
     $e = catchMoloniException(fn () => runIssueJob($receipt));
 

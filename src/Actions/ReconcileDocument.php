@@ -24,11 +24,13 @@ use Noop\Moloni\Support\Vat;
  * - Exactly one, with the row's customer and total: adopted.
  * - Anything else: the row is left Unknown for a person to decide.
  *
- * Receipts carry no our_reference in Moloni, so they are looked for on the invoices they settle
- * instead: each invoice is read (documents/getOne) and its reverse associations give the closed
+ * Receipts carry no our_reference in Moloni, so a receipt whose insert was never sent
+ * (insert_sent_at null) cannot exist there and is not looked for: it is issued, and Moloni's own
+ * balance check refuses an over-allocation. Once sent, it is looked for on the invoices it settles: each invoice is read (documents/getOne) and its reverse associations give the closed
  * receipts in the row's series that settle it, less those recorded on another local row. None on
  * any invoice: issue. One receipt on every invoice, with the row's amount on each and the row's
- * total: adopted. Anything else (on some invoices only, other amounts, more than one, an entry
+ * total, which itself settles exactly the row's invoices and amounts for the row's customer:
+ * adopted. Anything else (on some invoices only, other amounts, more than one, an entry
  * that cannot be read): Unknown.
  */
 class ReconcileDocument
@@ -75,6 +77,10 @@ class ReconcileDocument
 
     private function reconcileReceipt(InvoiceDocument $receipt): bool
     {
+        if ($receipt->insert_sent_at === null) {
+            return false;
+        }
+
         $allocations = RequestReceipt::allocationsOf($receipt);
         $found = [];
 
@@ -92,9 +98,13 @@ class ReconcileDocument
         $receiptId = count($ids) === 1 ? $ids[0] : null;
 
         if ($receiptId !== null && $this->receiptMatches($receipt, $allocations, $found)) {
-            $this->adopt($receipt, $receiptId, MoloniClient::documentNumber($this->client->document($receiptId)));
+            $row = $this->client->document($receiptId);
 
-            return true;
+            if ($this->settlesExactly($receipt, $allocations, $row)) {
+                $this->adopt($receipt, $receiptId, MoloniClient::documentNumber($row));
+
+                return true;
+            }
         }
 
         $this->leaveUnknown($receipt, Message::get('Moloni already has receipts on the invoices of :reference that cannot be confirmed as this one; check them in Moloni.', [
@@ -181,6 +191,47 @@ class ReconcileDocument
         }
 
         return true;
+    }
+
+    /**
+     * Whether the Moloni receipt settles exactly the row's invoices with the row's amounts (no
+     * other invoice) and belongs to the row's customer.
+     *
+     * @param  list<array{invoice_document_id: int, moloni_document_id: int, amount_cents: int}>  $allocations
+     * @param  array<string, mixed>  $row  The receipt, from documents/getOne.
+     */
+    private function settlesExactly(InvoiceDocument $receipt, array $allocations, array $row): bool
+    {
+        $associated = $row['associated_documents'] ?? null;
+
+        if (! is_array($associated)
+            || ! is_numeric($row['customer_id'] ?? null)
+            || (int) $row['customer_id'] !== $receipt->customer_id) {
+            return false;
+        }
+
+        $settles = [];
+
+        foreach ($associated as $entry) {
+            $id = is_array($entry) ? ($entry['associated_id'] ?? null) : null;
+
+            if (! is_numeric($id) || isset($settles[(int) $id])) {
+                return false;
+            }
+
+            $settles[(int) $id] = MoloniClient::cents($entry['value'] ?? null);
+        }
+
+        $expected = [];
+
+        foreach ($allocations as $allocation) {
+            $expected[$allocation['moloni_document_id']] = $allocation['amount_cents'];
+        }
+
+        ksort($settles);
+        ksort($expected);
+
+        return $settles === $expected;
     }
 
     private function adopt(InvoiceDocument $document, int $documentId, ?string $documentNumber): void

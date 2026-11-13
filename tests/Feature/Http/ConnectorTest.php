@@ -465,3 +465,24 @@ it('is registered as a singleton', function () {
     expect(app(MoloniConnector::class))->toBe(app(MoloniConnector::class))
         ->and(app(TokenStore::class))->toBe(app(TokenStore::class));
 });
+
+it('caps the HTTP timeouts so the time guard of the issuing job holds', function (int $timeout, int $connect, int $expectedTimeout, int $expectedConnect) {
+    config(['moloni.timeout' => $timeout, 'moloni.connect_timeout' => $connect]);
+    $seen = [];
+    Http::fake(function (Request $request, array $options) use (&$seen) {
+        if (str_contains($request->url(), '/grant/')) {
+            return Http::response(moloniGrant());
+        }
+
+        $seen = [$options['timeout'] ?? null, $options['connect_timeout'] ?? null];
+
+        return Http::response([]);
+    });
+
+    connectorWithCompany(5)->read('customers/getAll', []);
+
+    expect($seen)->toBe([$expectedTimeout, $expectedConnect]);
+})->with([
+    'within the caps' => [15, 5, 15, 5],
+    'above the caps' => [120, 60, 30, 10],
+]);

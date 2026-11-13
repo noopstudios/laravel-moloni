@@ -73,11 +73,11 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
     public const JOB_FAILED = 'job_failed';
 
-    /** Issued, but its read-back failed for good or too often: no longer repaired automatically. */
+    /** Issued, but still not read back READBACK_HOURS after it was issued: no longer repaired automatically. */
     public const READBACK_ABANDONED = 'readback_abandoned';
 
-    /** The runs (counted in `attempts`) after which a failing read-back is no longer repaired. */
-    public const MAX_READBACK_ATTEMPTS = 10;
+    /** How long after issued_at a failed read-back keeps being repaired. */
+    public const READBACK_HOURS = 24;
 
     /** Past this, a run never sends the insert: the lock (LOCK_SECONDS) must outlive the insert call. */
     public const MAX_RUN_SECONDS = 110;
@@ -262,6 +262,11 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
             return;
         }
 
+        // Committed on its own before the request leaves: from here on the document may exist in
+        // Moloni, and a receipt is only looked for there once this is set.
+        $document->insert_sent_at = now();
+        $document->save();
+
         try {
             $documentId = $client->insert($document->type, $payload);
         } catch (MoloniException $e) {
@@ -297,30 +302,24 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
     }
 
     /**
-     * Reads back an issued document whose read-back failed. A permanent failure (the document
-     * cannot be read, the company changed) or too many attempts abandon the repair: the row stays
-     * Issued with its Moloni id, and moloni:recover no longer dispatches it.
+     * Reads back an issued document whose read-back failed, whatever the earlier failure was,
+     * until READBACK_HOURS after it was issued; while another company is configured it is only
+     * skipped. After that the repair is abandoned: the row stays Issued with its Moloni id, and
+     * moloni:recover no longer dispatches it.
      */
     private function repairReadBack(InvoiceDocument $document, MoloniClient $client, MoloniSettings $settings): void
     {
-        if ($settings->companyIdOrNull() !== $document->company_id) {
-            $document->fill([
-                'error_type' => self::READBACK_ABANDONED,
-                'error_message' => Message::get('The document was requested for Moloni company :company, which is no longer the configured company.', ['company' => (string) $document->company_id]),
-            ])->save();
+        $issuedAt = $document->issued_at ?? $document->created_at ?? now();
+
+        if (now()->greaterThanOrEqualTo($issuedAt->copy()->addHours(self::READBACK_HOURS))) {
+            $document->error_type = self::READBACK_ABANDONED;
+            $document->save();
 
             return;
         }
 
-        $document->attempts++;
-        $document->save();
-
-        $error = $this->finish($document, $client, announce: false);
-        $permanent = $error instanceof MoloniException && $error->type === FailureType::Validation;
-
-        if ($error !== null && ($permanent || $document->attempts >= self::MAX_READBACK_ATTEMPTS)) {
-            $document->error_type = self::READBACK_ABANDONED;
-            $document->save();
+        if ($settings->companyIdOrNull() === $document->company_id) {
+            $this->finish($document, $client, announce: false);
         }
     }
 
@@ -489,14 +488,12 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
     /**
      * Reads the inserted document back for its number and total. The document is issued whatever
-     * the read-back says; a total that differs from the expected one is flagged. Returns the error
-     * that failed the read-back, if any.
+     * the read-back says; a total that differs from the expected one is flagged.
      */
-    private function finish(InvoiceDocument $document, MoloniClient $client, bool $announce = true): ?Throwable
+    private function finish(InvoiceDocument $document, MoloniClient $client, bool $announce = true): void
     {
         $errorType = null;
         $errorMessage = null;
-        $error = null;
 
         try {
             $row = $client->document((int) $document->document_id);
@@ -511,7 +508,6 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
                 ]);
             }
         } catch (Throwable $e) {
-            $error = $e;
             $errorType = self::READBACK_FAILED;
             $errorMessage = $e instanceof MoloniException
                 ? $this->message($e)
@@ -528,8 +524,6 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         if ($announce) {
             Event::dispatch(new DocumentIssued($document));
         }
-
-        return $error;
     }
 
     /**

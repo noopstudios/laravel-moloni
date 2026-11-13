@@ -57,7 +57,6 @@
     "Each receipt allocation must be a saved invoice and an amount in cents.": "Cada linha do recibo tem de ser uma fatura guardada e um valor em cêntimos.",
     "The invoice :invoice appears more than once in the receipt.": "A fatura :invoice aparece mais de uma vez no recibo.",
     "The amount settled on :invoice must be greater than zero.": "O valor liquidado na fatura :invoice tem de ser superior a zero.",
-    "The receipt key :key was already used for other invoices or amounts.": "A chave de recibo :key já foi usada para outras faturas ou valores.",
     "Only issued invoices can be settled by a receipt, and :invoice is not one.": "Só é possível liquidar faturas emitidas com um recibo, e :invoice não o é.",
     "The invoice :invoice belongs to another Moloni company.": "A fatura :invoice pertence a outra empresa do Moloni.",
     "The invoices settled by one receipt must belong to the same Moloni customer.": "As faturas liquidadas por um recibo têm de pertencer ao mesmo cliente do Moloni.",
@@ -69,5 +68,8 @@
     "No exemption reason is configured for :scenario.": "Não está configurado nenhum motivo de isenção para :scenario.",
     "EU business": "empresa da UE",
     "non-EU business": "empresa fora da UE",
-    "non-EU consumer": "consumidor fora da UE"
+    "non-EU consumer": "consumidor fora da UE",
+    "The receipt key :key already belongs to another receipt; use a new key.": "A chave de recibo :key já pertence a outro recibo; use uma chave nova.",
+    "A receipt can settle at most :max invoices.": "Um recibo pode liquidar no máximo :max faturas.",
+    "The invoice :invoice has no Moloni customer.": "A fatura :invoice não tem cliente do Moloni."
 }

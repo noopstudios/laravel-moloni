@@ -47,6 +47,7 @@ use Noop\Moloni\Support\Vat;
  * @property int|null $document_id
  * @property string|null $document_number
  * @property Carbon|null $issued_at
+ * @property Carbon|null $insert_sent_at When the insert was last about to be sent: null means nothing of this row can exist in Moloni.
  * @property Carbon|null $due_at
  * @property array<string, mixed>|null $vies
  * @property array<string, mixed>|null $payload The frozen request (InvoiceData and what the type needs).
@@ -79,6 +80,7 @@ class InvoiceDocument extends Model
         'document_id',
         'document_number',
         'issued_at',
+        'insert_sent_at',
         'due_at',
         'vies',
         'payload',
@@ -103,6 +105,7 @@ class InvoiceDocument extends Model
             'customer_id' => 'integer',
             'document_id' => 'integer',
             'issued_at' => 'datetime',
+            'insert_sent_at' => 'datetime',
             'due_at' => 'date',
             'vies' => 'array',
             'payload' => 'array',
@@ -195,6 +198,8 @@ class InvoiceDocument extends Model
      *
      * The invoice's own status is ignored: a pending, failed or voided invoice still reports an
      * amount. Callers allocating receipts or credit notes must require the invoice to be Issued.
+     *
+     * For display: it is a plain read. Allocating uses outstandingCentsForUpdate().
      */
     public function outstandingCents(): int
     {
@@ -207,6 +212,50 @@ class InvoiceDocument extends Model
             ->value('settled');
 
         return max(0, $this->expected_total_cents - $settled);
+    }
+
+    /**
+     * What each invoice still owes, for code that allocates against invoices (receipts, and credit
+     * notes when they come): call it inside the transaction that locked the invoices with
+     * lockForUpdate(), in ascending id order. The live settling links and their documents are read
+     * with FOR UPDATE and summed here (FOR UPDATE on an aggregate is refused by PostgreSQL), so the
+     * read sees what other transactions committed while this one waited for the invoice locks; a
+     * plain read would see the snapshot MySQL's REPEATABLE READ took at the transaction's first read.
+     *
+     * @param  iterable<self>  $invoices  Locked invoices.
+     * @return array<int, int> Invoice id => cents still owed, never below zero; zero for other types.
+     */
+    public static function outstandingCentsForUpdate(iterable $invoices): array
+    {
+        $byId = [];
+
+        foreach ($invoices as $invoice) {
+            $byId[$invoice->id] = $invoice;
+        }
+
+        if ($byId === []) {
+            return [];
+        }
+
+        $settled = array_fill_keys(array_keys($byId), 0);
+        $links = self::settlingLinks(reset($byId)->getConnection()->table('invoice_document_links', 'l'))
+            ->whereIn('l.associated_document_id', array_keys($byId))
+            ->lockForUpdate()
+            ->get(['l.associated_document_id', 'l.amount_cents']);
+
+        foreach ($links as $link) {
+            $settled[(int) $link->associated_document_id] += (int) $link->amount_cents;
+        }
+
+        $outstanding = [];
+
+        foreach ($byId as $id => $invoice) {
+            $outstanding[$id] = $invoice->type === DocumentType::Invoice
+                ? max(0, $invoice->expected_total_cents - $settled[$id])
+                : 0;
+        }
+
+        return $outstanding;
     }
 
     /**
@@ -241,16 +290,23 @@ class InvoiceDocument extends Model
      */
     private static function settledCentsQuery(QueryBuilder $query): QueryBuilder
     {
-        return $query
-            ->from('invoice_document_links', 'l')
+        return self::settlingLinks($query->from('invoice_document_links', 'l'))
+            // Unqualified: only the links table has amount_cents, and a raw alias would miss a table prefix.
+            ->selectRaw('coalesce(sum(amount_cents), 0) as settled');
+    }
+
+    /**
+     * Restricts links (aliased "l") to those of live receipts and credit notes (joined as "s").
+     */
+    private static function settlingLinks(QueryBuilder $links): QueryBuilder
+    {
+        return $links
             ->join('invoice_documents as s', 's.id', '=', 'l.document_id')
             ->whereIn('s.type', array_map(
                 fn (DocumentType $type) => $type->value,
                 array_values(array_filter(DocumentType::cases(), fn (DocumentType $type) => $type->settlesDebt())),
             ))
-            ->whereIn('s.status', array_map(fn (DocumentStatus $status) => $status->value, DocumentStatus::live()))
-            // Unqualified: only the links table has amount_cents, and a raw alias would miss a table prefix.
-            ->selectRaw('coalesce(sum(amount_cents), 0) as settled');
+            ->whereIn('s.status', array_map(fn (DocumentStatus $status) => $status->value, DocumentStatus::live()));
     }
 
     /**

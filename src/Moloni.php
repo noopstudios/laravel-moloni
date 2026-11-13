@@ -63,8 +63,15 @@ class Moloni
      * per receipt. $owner (any saved model) becomes the receipt's invoiceable.
      *
      * Without $idempotencyKey every call records a new receipt. A caller reacting to a payment
-     * should pass the payment's id: a repeated call then returns the same receipt, and refuses
-     * other invoices or amounts under that key.
+     * should pass the payment's id: a repeated call with the same invoices, amounts and payment
+     * method returns the same receipt (and sends a failed one again, as retry() does); other
+     * invoices, amounts or method under that key are refused, since the key already belongs to
+     * another receipt.
+     *
+     * At most RequestReceipt::MAX_INVOICES invoices per receipt. The invoices are locked until
+     * the caller's transaction ends: requesting receipts on overlapping invoices in opposite
+     * orders within one host transaction can deadlock (a QueryException), so request one receipt
+     * per transaction.
      *
      * @param  list<array{0: InvoiceDocument, 1: int}>  $allocations
      *
@@ -77,6 +84,8 @@ class Moloni
 
         if ($created) {
             $this->dispatch($receipt);
+        } elseif ($receipt->status === DocumentStatus::Failed) {
+            $this->retry($receipt);
         }
 
         return $receipt;

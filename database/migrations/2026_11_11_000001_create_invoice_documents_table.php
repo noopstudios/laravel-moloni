@@ -26,6 +26,7 @@ return new class extends Migration
             $table->unsignedBigInteger('document_id')->nullable();
             $table->string('document_number')->nullable();
             $table->timestamp('issued_at')->nullable();
+            $table->timestamp('insert_sent_at')->nullable();
             $table->date('due_at')->nullable();
             $table->json('vies')->nullable();
             $table->json('payload')->nullable();

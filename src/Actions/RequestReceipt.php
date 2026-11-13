@@ -30,6 +30,9 @@ class RequestReceipt
     /** The only currency the package issues in for now. */
     private const CURRENCY = 'EUR';
 
+    /** Reconciliation reads every invoice in turn, within the issuing job's time budget. */
+    public const MAX_INVOICES = 25;
+
     /** The width of invoice_documents.operation_key. */
     private const MAX_OPERATION_KEY_LENGTH = 255;
 
@@ -66,12 +69,6 @@ class RequestReceipt
             throw new InvalidArgumentException(Message::get('The receipt idempotency key is too long.'));
         }
 
-        $existing = $this->existing($operationKey, $requested, $payment, $idempotencyKey);
-
-        if ($existing !== null) {
-            return [$existing, false];
-        }
-
         $settings = app(MoloniSettings::class);
         $companyId = $settings->companyIdOrNull()
             ?? throw new MoloniException(Message::get('No Moloni company is configured.'), FailureType::Validation);
@@ -87,8 +84,8 @@ class RequestReceipt
             return (new InvoiceDocument)->getConnection()->transaction(function () use ($owner, $requested, $payment, $operationKey, $idempotencyKey, $companyId, $documentSetId) {
                 $invoices = $this->lockInvoices(array_keys($requested));
 
-                // Again under the lock: a concurrent call with the same key may have committed the
-                // receipt while this one waited, and its links now take up the invoices' balance.
+                // Only now, and as a locking read: a concurrent call with the same key may have
+                // committed the receipt while this one waited, and its links take up the balance.
                 $existing = $this->existing($operationKey, $requested, $payment, $idempotencyKey);
 
                 if ($existing !== null) {
@@ -204,6 +201,10 @@ class RequestReceipt
             throw new InvalidArgumentException(Message::get('A receipt needs a list of invoices, each with the amount it settles.'));
         }
 
+        if (count($allocations) > self::MAX_INVOICES) {
+            throw new InvalidArgumentException(Message::get('A receipt can settle at most :max invoices.', ['max' => self::MAX_INVOICES]));
+        }
+
         $requested = [];
 
         foreach ($allocations as $allocation) {
@@ -233,13 +234,14 @@ class RequestReceipt
     }
 
     /**
-     * The receipt already recorded under the operation key, when it is the same request.
+     * The receipt already recorded under the operation key (a locking read), when it is the same
+     * request: the same invoices and amounts, total and payment method.
      *
      * @param  array<int, int>  $requested
      */
     private function existing(string $operationKey, array $requested, PaymentData $payment, ?string $idempotencyKey): ?InvoiceDocument
     {
-        $existing = InvoiceDocument::query()->where('operation_key', $operationKey)->first();
+        $existing = InvoiceDocument::query()->where('operation_key', $operationKey)->lockForUpdate()->first();
 
         if ($existing === null) {
             return null;
@@ -254,8 +256,10 @@ class RequestReceipt
         ksort($stored);
         ksort($requested);
 
-        if ($stored !== $requested || $existing->expected_total_cents !== $payment->amountCents) {
-            throw new InvalidArgumentException(Message::get('The receipt key :key was already used for other invoices or amounts.', ['key' => (string) $idempotencyKey]));
+        $storedMethod = $existing->payload['payment']['method'] ?? null;
+
+        if ($stored !== $requested || $existing->expected_total_cents !== $payment->amountCents || $storedMethod !== $payment->method) {
+            throw new InvalidArgumentException(Message::get('The receipt key :key already belongs to another receipt; use a new key.', ['key' => (string) $idempotencyKey]));
         }
 
         return $existing;
@@ -299,11 +303,15 @@ class RequestReceipt
             if ($invoice->currency !== self::CURRENCY) {
                 throw new InvalidArgumentException(Message::get('Cannot issue in :currency: currency not supported yet.', ['currency' => $invoice->currency]));
             }
+
+            if ($invoice->customer_id === null) {
+                throw new InvalidArgumentException(Message::get('The invoice :invoice has no Moloni customer.', ['invoice' => $label]));
+            }
         }
 
         $customers = $invoices->pluck('customer_id')->unique();
 
-        if ($customers->count() !== 1 || $customers->first() === null) {
+        if ($customers->count() !== 1) {
             throw new InvalidArgumentException(Message::get('The invoices settled by one receipt must belong to the same Moloni customer.'));
         }
 
@@ -311,8 +319,10 @@ class RequestReceipt
             throw new InvalidArgumentException(Message::get('Invoices of a final consumer cannot be settled together by one receipt.'));
         }
 
+        $owed = InvoiceDocument::outstandingCentsForUpdate($invoices);
+
         foreach ($invoices as $invoice) {
-            $outstanding = $invoice->outstandingCents();
+            $outstanding = $owed[$invoice->id];
 
             if ($requested[$invoice->id] > $outstanding) {
                 throw new InvalidArgumentException(Message::get('The amount of :amount for :invoice is more than the :outstanding it still owes.', [

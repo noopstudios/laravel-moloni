@@ -63,6 +63,8 @@ return [
 
     'base_url' => env('MOLONI_BASE_URL', 'https://api.moloni.pt/v1/'),
 
+    // Seconds, capped at 30 (timeout) and 10 (connect_timeout): the issuing job's time guard
+    // assumes short requests, so larger values are lowered.
     'timeout' => (int) env('MOLONI_TIMEOUT', 15),
 
     'connect_timeout' => (int) env('MOLONI_CONNECT_TIMEOUT', 5),

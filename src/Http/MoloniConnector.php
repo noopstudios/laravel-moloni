@@ -17,6 +17,12 @@ class MoloniConnector
 
     private const MAX_PAGES = 200;
 
+    /** Seconds; a larger moloni.timeout is capped to this. */
+    public const MAX_TIMEOUT = 30;
+
+    /** Seconds; a larger moloni.connect_timeout is capped to this. */
+    public const MAX_CONNECT_TIMEOUT = 10;
+
     /**
      * @param  (Closure(): ?int)|null  $companyId
      */
@@ -108,8 +114,9 @@ class MoloniConnector
         $uncertain = $isWrite ? FailureType::Unknown : FailureType::Transient;
 
         try {
-            $response = Http::timeout((int) config('moloni.timeout'))
-                ->connectTimeout((int) config('moloni.connect_timeout'))
+            // Capped: the issuing job never sends an insert after 110 s of a 120 s timeout.
+            $response = Http::timeout(min((int) config('moloni.timeout'), self::MAX_TIMEOUT))
+                ->connectTimeout(min((int) config('moloni.connect_timeout'), self::MAX_CONNECT_TIMEOUT))
                 ->withQueryParameters(['access_token' => $token, 'json' => 'true', 'human_errors' => 'true'])
                 ->post($this->url($endpoint), $params);
         } catch (StrayRequestException) {
