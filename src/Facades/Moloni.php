@@ -13,6 +13,8 @@ use Noop\Moloni\Testing\MoloniFake;
 /**
  * @method static InvoiceDocument invoice(Invoiceable $invoiceable, int $dueInDays = 0)
  * @method static InvoiceDocument invoiceReceipt(Invoiceable $invoiceable, PaymentData $payment)
+ * @method static InvoiceDocument proforma(Invoiceable $invoiceable, string $idempotencyKey)
+ * @method static InvoiceDocument convert(InvoiceDocument $proforma, ?PaymentData $payment = null, int $dueInDays = 0)
  * @method static InvoiceDocument receipt(Model $owner, list<array{0: InvoiceDocument, 1: int}> $allocations, PaymentData $payment, ?string $idempotencyKey = null)
  * @method static InvoiceDocument creditNote(InvoiceDocument $document, list<CreditLine>|null $lines = null, ?string $idempotencyKey = null)
  * @method static InvoiceDocument cancel(InvoiceDocument $document, string $reason)

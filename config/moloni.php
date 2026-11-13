@@ -118,4 +118,20 @@ return [
         'timeout' => (int) env('MOLONI_VIES_TIMEOUT', 5),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Filament permissions
+    |--------------------------------------------------------------------------
+    |
+    | Abilities checked with $user->can() for the Moloni settings page, the
+    | documents and their actions: a user with either one is allowed. A null
+    | permission grants nothing.
+    |
+    */
+
+    'permissions' => [
+        'manage' => 'manage moloni',
+        'full_admin' => null,
+    ],
+
 ];
