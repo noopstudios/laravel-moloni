@@ -66,4 +66,16 @@ trait CallsMoloni
             && in_array($record->type, $types, true)
             && in_array($record->status, $statuses, true);
     }
+
+    /**
+     * Whether the record is a document of one of $types that is valid in Moloni: issued, or
+     * superseded by a reissue after it reached Moloni (nothing is cancelled there on a reissue).
+     *
+     * @param  list<DocumentType>  $types
+     */
+    protected static function isValidInMoloni(?InvoiceDocument $record, array $types): bool
+    {
+        return self::isDocument($record, $types, [DocumentStatus::Issued])
+            || (self::isDocument($record, $types, [DocumentStatus::Superseded]) && $record?->document_id !== null);
+    }
 }

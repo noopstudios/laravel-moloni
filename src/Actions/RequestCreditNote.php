@@ -21,7 +21,8 @@ use Noop\Moloni\Support\Message;
 use Noop\Moloni\Support\Payload;
 
 /**
- * Records a credit note on an issued invoice or invoice-receipt, without calling Moloni. The
+ * Records a credit note on an issued invoice or invoice-receipt (or one superseded by a reissue
+ * after it reached Moloni, where it is still valid), without calling Moloni. The
  * origin is locked and re-read, and so are the live credit notes already crediting it: each line
  * can be credited up to its quantity across all of them (Moloni tracks the same per line).
  *
@@ -305,9 +306,10 @@ class RequestCreditNote
     {
         $current = InvoiceDocument::query()->whereKey($origin->getKey())->lockForUpdate()->first();
 
+        // A superseded document with a Moloni id is still valid there (a reissue cancels nothing).
         if ($current === null
             || ! in_array($current->type, [DocumentType::Invoice, DocumentType::InvoiceReceipt], true)
-            || $current->status !== DocumentStatus::Issued
+            || ! in_array($current->status, [DocumentStatus::Issued, DocumentStatus::Superseded], true)
             || $current->document_id === null) {
             throw new InvalidArgumentException(Message::get('Only an issued invoice or invoice-receipt can be credited.'));
         }

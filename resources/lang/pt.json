@@ -100,6 +100,7 @@
     "Only an issued document can be cancelled.": "Só é possível anular um documento emitido.",
     "The document :document was issued for another Moloni company.": "O documento :document foi emitido para outra empresa do Moloni.",
     "Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.": "Não é possível anular :document enquanto dependerem dele: :dependants. Anule-os primeiro ou emita uma nota de crédito.",
+    "Cannot reissue :document while other documents depend on it: :dependants. Cancel them first, or correct it with a credit note instead of reissuing.": "Não é possível reemitir :document enquanto dependerem dele: :dependants. Anule-os primeiro ou, em vez de reemitir, corrija-o com uma nota de crédito.",
     "Only a document awaiting confirmation can be reconciled.": "Só é possível reconciliar um documento por confirmar.",
     "Moloni cancelled :document, but :dependants was requested for it meanwhile; check them in Moloni.": "O Moloni anulou :document, mas entretanto foi pedido para ele: :dependants; verifique-os no Moloni.",
     "Failure simulated by Moloni::fake().": "Falha simulada por Moloni::fake().",

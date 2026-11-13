@@ -153,9 +153,26 @@ it('refuses to credit or cancel a document that is not issued', function (array 
     'failed' => [['status' => DocumentStatus::Failed, 'document_id' => null]],
     'unknown' => [['status' => DocumentStatus::Unknown, 'document_id' => null]],
     'voided' => [['status' => DocumentStatus::Voided]],
-    'superseded' => [['status' => DocumentStatus::Superseded]],
+    'superseded before it reached Moloni' => [['status' => DocumentStatus::Superseded, 'document_id' => null]],
     'issued without a Moloni id' => [['document_id' => null]],
 ]);
+
+it('cancels a document superseded by a reissue, which is still valid in Moloni', function () {
+    cxFake();
+    Queue::fake();
+    $document = cxIssued();
+    $new = Moloni::reissue($document);
+    expect($document->status)->toBe(DocumentStatus::Superseded);
+
+    $voided = Moloni::cancel($document, 'Reissued by mistake');
+
+    expect($voided->status)->toBe(DocumentStatus::Voided)
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Voided)
+        ->and(moloniRequests('documents/documentCancel')[0]['document_id'])->toBe(8001)
+        // The reissued document keeps the live slot.
+        ->and($new->fresh()?->active_key)->not->toBeNull();
+    Event::assertDispatched(DocumentVoided::class, fn (DocumentVoided $event) => $event->document->is($document));
+});
 
 it('refuses to cancel a document issued for another company', function () {
     Http::fake();
@@ -170,7 +187,7 @@ it('judges the document as stored, not the copy it was given', function () {
     Http::fake();
     $document = cxIssued();
     $stale = InvoiceDocument::findOrFail($document->id);
-    $document->fill(['status' => DocumentStatus::Superseded])->save();
+    $document->fill(['status' => DocumentStatus::Voided])->save();
 
     expect(catchMoloniException(fn () => Moloni::cancel($stale, 'Order cancelled'))->type)->toBe(FailureType::Validation);
     Http::assertNothingSent();
@@ -310,6 +327,65 @@ it('refuses a receipt, credit note or conversion while the document is being can
     'a credit note' => [DocumentType::Invoice, fn (InvoiceDocument $invoice) => Moloni::creditNote($invoice)],
     'a conversion' => [DocumentType::Proforma, fn (InvoiceDocument $proforma) => Moloni::convert($proforma)],
 ]);
+
+it('refuses to reissue an issued document that live receipts or credit notes act on', function (DocumentType $type, DocumentType $dependantType, DocumentStatus $status) {
+    Http::fake();
+    Queue::fake();
+    $document = cxIssued($type);
+    cxDependant($document, $dependantType, $status);
+    $payment = $type === DocumentType::InvoiceReceipt ? new PaymentData('card', Carbon::now(), 12300) : null;
+
+    $e = catchMoloniException(fn () => Moloni::reissue($document, $payment));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('Cannot reissue GR/8')
+        ->and($e->getMessage())->toContain('#DEP-'.$dependantType->value)
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and($document->fresh()?->active_key)->not->toBeNull()
+        ->and(InvoiceDocument::count())->toBe(2);
+    Queue::assertNothingPushed();
+    Http::assertNothingSent();
+})->with([
+    'a paid invoice' => [DocumentType::Invoice, DocumentType::Receipt, DocumentStatus::Issued],
+    'a pending receipt' => [DocumentType::Invoice, DocumentType::Receipt, DocumentStatus::Pending],
+    'an unknown receipt' => [DocumentType::Invoice, DocumentType::Receipt, DocumentStatus::Unknown],
+    'a credited invoice' => [DocumentType::Invoice, DocumentType::CreditNote, DocumentStatus::Issued],
+    'a credited invoice-receipt' => [DocumentType::InvoiceReceipt, DocumentType::CreditNote, DocumentStatus::Issued],
+]);
+
+it('says in Portuguese what blocks a reissue', function () {
+    Http::fake();
+    Queue::fake();
+    app()->setLocale('pt');
+    $document = cxIssued();
+    cxDependant($document, DocumentType::Receipt);
+
+    expect(catchMoloniException(fn () => Moloni::reissue($document))->getMessage())
+        ->toBe('Não é possível reemitir GR/8 enquanto dependerem dele: Recibo #DEP-receipt. Anule-os primeiro ou, em vez de reemitir, corrija-o com uma nota de crédito.');
+});
+
+it('reissues an issued document whose dependants no longer count', function (DocumentStatus $status) {
+    Http::fake();
+    Queue::fake();
+    $document = cxIssued();
+    cxDependant($document, DocumentType::Receipt, $status);
+
+    $new = Moloni::reissue($document);
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Superseded)
+        ->and($new->status)->toBe(DocumentStatus::Pending);
+})->with([DocumentStatus::Failed, DocumentStatus::Voided]);
+
+it('reissues an unconfirmed document as before, whatever links it', function () {
+    Http::fake();
+    Queue::fake();
+    $document = cxIssued(attributes: ['status' => DocumentStatus::Unknown, 'document_id' => null, 'document_number' => null]);
+    cxDependant($document, DocumentType::Receipt);
+
+    Moloni::reissue($document);
+
+    expect($document->fresh()?->status)->toBe(DocumentStatus::Superseded);
+});
 
 it('refuses to reissue a conversion while its pro-forma is being cancelled', function () {
     Http::fake();

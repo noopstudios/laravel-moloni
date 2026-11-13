@@ -28,7 +28,9 @@ use Noop\Moloni\Filament\Resources\InvoiceDocuments\Pages\ListInvoiceDocuments;
 use Noop\Moloni\Filament\Resources\InvoiceDocuments\Pages\ViewInvoiceDocument;
 use Noop\Moloni\Jobs\IssueDocument;
 use Noop\Moloni\Models\InvoiceDocument;
+use Noop\Moloni\Models\InvoiceDocumentLink;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Tests\Fixtures\DocumentActionsComponent;
 use Noop\Moloni\Tests\Fixtures\Order;
 use Noop\Moloni\Tests\Fixtures\User;
 
@@ -152,17 +154,21 @@ it('shows each action only where the manager accepts it', function () {
     $proforma = InvoiceDocument::factory()->proforma()->issued()->create();
     $receipt = InvoiceDocument::factory()->receipt()->issued()->create();
     $pending = InvoiceDocument::factory()->create();
+    // Reissued: still valid in Moloni, so it can be cancelled or credited there.
+    $superseded = issuedInvoice(['status' => DocumentStatus::Superseded, 'document_id' => 8002]);
+    // Reissued while unconfirmed: nothing of it is known in Moloni.
+    $supersededUnknown = issuedInvoice(['status' => DocumentStatus::Superseded, 'document_id' => null, 'document_number' => null]);
 
     $visible = [
         'retry' => [],
         'reissue' => [$invoice, $unknownInvoice],
         'reconcile' => [$unknownInvoice, $unknownReceipt],
         'convert' => [$proforma],
-        'creditNote' => [$invoice],
-        'cancel' => [$invoice],
+        'creditNote' => [$invoice, $superseded],
+        'cancel' => [$invoice, $proforma, $receipt, $superseded],
         'downloadPdf' => [$invoice, $proforma, $receipt],
     ];
-    $all = [$invoice, $unknownInvoice, $unknownReceipt, $proforma, $receipt, $pending];
+    $all = [$invoice, $unknownInvoice, $unknownReceipt, $proforma, $receipt, $pending, $superseded, $supersededUnknown];
     $component = Livewire::test(ListInvoiceDocuments::class);
 
     foreach ($visible as $name => $documents) {
@@ -285,6 +291,75 @@ it('offers a full credit note when Moloni refuses the cancellation', function ()
     Queue::assertPushed(IssueDocument::class, 1);
 });
 
+it('cancels a receipt from the table, then the invoice it settled', function () {
+    grantMoloniPermission();
+    useIssueSettings();
+    Http::fake([
+        '*/grant/*' => moloniGrant(),
+        '*/documents/documentCancel/*' => ['valid' => 1],
+    ]);
+    $invoice = issuedInvoice();
+    $receipt = InvoiceDocument::factory()->receipt()->issued()->create(['company_id' => 5, 'document_id' => 9001, 'document_number' => 'RG/1', 'expected_total_cents' => 12300]);
+    InvoiceDocumentLink::create(['document_id' => $receipt->id, 'associated_document_id' => $invoice->id, 'amount_cents' => 12300]);
+
+    // The invoice is refused while its receipt is live, without offering a credit note.
+    Livewire::test(ListInvoiceDocuments::class)
+        ->callAction(TestAction::make('cancel')->table($invoice), ['reason' => 'Order cancelled'])
+        ->assertNotified(__('Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.', ['document' => 'GR/8', 'dependants' => DocumentType::Receipt->getLabel().' RG/1']))
+        ->assertActionNotMounted(TestAction::make('creditNote')->table($invoice));
+    expect($invoice->fresh()?->status)->toBe(DocumentStatus::Issued);
+
+    Livewire::test(ListInvoiceDocuments::class)
+        ->callAction(TestAction::make('cancel')->table($receipt), ['reason' => 'Paid by mistake'])
+        ->assertHasNoActionErrors()
+        ->assertNotified(__('The document was cancelled in Moloni.'))
+        ->callAction(TestAction::make('cancel')->table($invoice), ['reason' => 'Order cancelled'])
+        ->assertHasNoActionErrors()
+        ->assertNotified(__('The document was cancelled in Moloni.'));
+
+    expect($receipt->fresh()?->status)->toBe(DocumentStatus::Voided)
+        ->and($invoice->fresh()?->status)->toBe(DocumentStatus::Voided)
+        ->and(collect(moloniRequests('documents/documentCancel'))->map(fn (Request $request) => $request['document_id'])->all())->toBe([9001, 8001]);
+});
+
+it('offers no credit note when Moloni refuses to cancel a receipt', function () {
+    grantMoloniPermission();
+    useIssueSettings();
+    Http::fake([
+        '*/grant/*' => moloniGrant(),
+        '*/documents/documentCancel/*' => ['valid' => 0, 'message' => [['code' => '1 document', 'description' => 'The document cannot be cancelled.']]],
+        '*/documents/getOne/*' => moloniDocumentRow(['document_id' => 9001, 'status' => 1]),
+    ]);
+    $receipt = InvoiceDocument::factory()->receipt()->issued()->create(['company_id' => 5, 'document_id' => 9001, 'document_number' => 'RG/1']);
+
+    Livewire::test(ListInvoiceDocuments::class)
+        ->callAction(TestAction::make('cancel')->table($receipt), ['reason' => 'Paid by mistake'])
+        ->assertNotified(__('Moloni refused to cancel :document: :reason', ['document' => 'RG/1', 'reason' => 'The document cannot be cancelled.']))
+        ->assertActionNotMounted(TestAction::make('creditNote')->table($receipt));
+
+    expect($receipt->fresh()?->status)->toBe(DocumentStatus::Issued);
+});
+
+it('offers a full credit note when Moloni refuses to cancel a superseded invoice', function () {
+    grantMoloniPermission();
+    Queue::fake();
+    useIssueSettings(['document_sets' => ['invoice' => 41, 'invoice_receipt' => 42, 'credit_note' => 44]]);
+    Http::fake([
+        '*/grant/*' => moloniGrant(),
+        '*/documents/documentCancel/*' => ['valid' => 0, 'message' => [['code' => '10 associated_id', 'description' => 'The associated document is not valid.']]],
+        '*/documents/getOne/*' => moloniDocumentRow(['document_id' => 8001, 'status' => 1]),
+    ]);
+    $document = issuedInvoice(['status' => DocumentStatus::Superseded]);
+
+    Livewire::test(ListInvoiceDocuments::class)
+        ->callAction(TestAction::make('cancel')->table($document), ['reason' => 'Reissued by mistake'])
+        ->assertActionMounted(TestAction::make('creditNote')->table($document))
+        ->callMountedAction()
+        ->assertNotified(__('A credit note was requested for this document.'));
+
+    expect(InvoiceDocument::query()->where('type', DocumentType::CreditNote)->sole()->links()->sole()->associated_document_id)->toBe($document->id);
+});
+
 it('cancels an issued document outside any database transaction', function () {
     grantMoloniPermission();
     useIssueSettings();
@@ -329,6 +404,27 @@ it('redirects the download action to a link fetched at click time', function () 
 
     Http::assertSent(fn (Request $request) => str_contains($request->url(), 'getPDFLink') && (int) $request['document_id'] === 8001);
     expect(json_encode($document->fresh()?->toArray()))->not->toContain('moloni.example.test');
+});
+
+it('hides the cancel action from a user without the permission outside the resource', function () {
+    useIssueSettings();
+    Http::fake();
+    $document = issuedInvoice();
+
+    // Mounting and submitting it by hand, as a crafted Livewire request would, does nothing.
+    $component = Livewire::test(DocumentActionsComponent::class, ['document' => $document])
+        ->assertActionHidden('cancel')
+        ->call('mountAction', 'cancel')
+        ->set('mountedActions.0.data.reason', 'Order cancelled')
+        ->call('callMountedAction');
+
+    expect($component->instance()->mountedActions[0] ?? null)->toBeNull()
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Issued);
+    Http::assertNothingSent();
+
+    grantMoloniPermission();
+    Livewire::test(DocumentActionsComponent::class, ['document' => $document])
+        ->assertActionVisible('cancel');
 });
 
 it('keeps every action usable outside the resource', function () {

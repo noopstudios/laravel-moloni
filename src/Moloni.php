@@ -42,6 +42,9 @@ class Moloni
     /** The width of invoice_documents.operation_key. */
     private const MAX_OPERATION_KEY_LENGTH = 255;
 
+    /** Tries of a transaction the package owns, when it deadlocks. */
+    private const DEADLOCK_ATTEMPTS = 3;
+
     /** Documents and payments are dated in Portugal's calendar (mainland), as Moloni dates them. */
     public const TIMEZONE = 'Europe/Lisbon';
 
@@ -228,7 +231,8 @@ class Moloni
     }
 
     /**
-     * A credit note on an issued invoice or invoice-receipt: $lines (a list of CreditLine, by the
+     * A credit note on an issued invoice or invoice-receipt, or on one superseded by reissue() after
+     * it reached Moloni (still valid there): $lines (a list of CreditLine, by the
      * position of the line in the document's request), or with null everything still creditable
      * on every line. Each line can be credited up to its quantity across all live credit notes.
      *
@@ -317,7 +321,9 @@ class Moloni
     /**
      * Replaces an issued or unknown invoice or invoice-receipt with a new one, built from the
      * invoiceable's current data, with the same type and, unless given, the same payment and term.
-     * The old row is marked superseded; nothing is cancelled in Moloni.
+     * The old row is marked superseded; nothing is cancelled in Moloni. An issued document that
+     * live receipts or credit notes act on is refused (Validation): cancel them first, or correct
+     * the document with a credit note instead of reissuing it.
      */
     public function reissue(InvoiceDocument $document, ?PaymentData $payment = null, ?int $dueInDays = null): InvoiceDocument
     {
@@ -339,9 +345,12 @@ class Moloni
 
         $new = $this->whileHolding($document, function () use ($document, $invoiceable, $attributes) {
             try {
-                return $document->getConnection()->transaction(function () use ($document, $invoiceable, $attributes) {
+                $connection = $document->getConnection();
+
+                return $connection->transaction(function () use ($document, $invoiceable, $attributes) {
                     $old = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
                     $this->assertReissuable($old);
+                    $this->assertNothingDependsOn($old);
                     $old->status = DocumentStatus::Superseded;
                     $old->save();
                     $converts = $old->payload['converts'] ?? null;
@@ -364,7 +373,7 @@ class Moloni
                     }
 
                     return tap($this->create($document->type, $invoiceable, $attributes), $this->linkConversion(...));
-                });
+                }, $connection->transactionLevel() === 0 ? self::DEADLOCK_ATTEMPTS : 1);
             } catch (UniqueConstraintViolationException) {
                 throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $document->reference]), FailureType::Validation);
             }
@@ -429,7 +438,9 @@ class Moloni
 
     /**
      * Cancels an issued document in Moloni and marks it voided: it no longer counts, frees its
-     * invoiceable's live slot and releases what it settled. Moloni accepts it only while no other
+     * invoiceable's live slot and releases what it settled. A document superseded by reissue()
+     * after it reached Moloni (it has a Moloni id) is still valid there and can be cancelled too:
+     * it becomes voided and DocumentVoided fires for it. Moloni accepts it only while no other
      * document depends on it, so a live receipt, credit note or conversion on it is refused here
      * without calling Moloni (cancel those first, or issue a credit note instead). A refusal from
      * Moloni is Validation with its reason, and nothing is issued in its place.
@@ -543,7 +554,8 @@ class Moloni
                 $current = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
                 $label = $current->document_number ?? $current->reference;
 
-                if ($current->status !== DocumentStatus::Issued || $current->document_id === null) {
+                // A superseded document is still valid in Moloni when its reissue came after it got there.
+                if (! in_array($current->status, [DocumentStatus::Issued, DocumentStatus::Superseded], true) || $current->document_id === null) {
                     throw new MoloniException(__('Only an issued document can be cancelled.'), FailureType::Validation);
                 }
 
@@ -573,11 +585,12 @@ class Moloni
      * snapshot is taken at the first plain read after the row lock was granted, so it sees every dependant
      * committed by a writer that held that lock. Locking the dependants would take them after the
      * origin, the reverse of retry() and resends, and a deadlock there could strand a document
-     * Moloni already cancelled.
+     * Moloni already cancelled. $forUpdate reads them with FOR UPDATE, for callers that may run
+     * inside a host transaction (see assertNothingDependsOn()).
      *
      * @return Collection<int, InvoiceDocument>
      */
-    private function liveDependants(InvoiceDocument $document): Collection
+    private function liveDependants(InvoiceDocument $document, bool $forUpdate = false): Collection
     {
         return InvoiceDocument::query()
             ->select('invoice_documents.*')
@@ -585,9 +598,33 @@ class Moloni
             ->where('l.associated_document_id', $document->getKey())
             ->whereIn('invoice_documents.status', DocumentStatus::live())
             ->orderBy('invoice_documents.id')
+            ->when($forUpdate, fn (Builder $query) => $query->lockForUpdate())
             ->get()
             ->unique('id')
             ->values();
+    }
+
+    /**
+     * Refuses to reissue an issued document that live receipts or credit notes act on: they would
+     * stay attached to the superseded row while the new document owes everything. Call inside the
+     * transaction that locked $document. reissue() may run inside a host transaction, whose
+     * snapshot can predate a dependant committed since, so they are read with FOR UPDATE, in the
+     * origin-then-dependant order receipts and credit notes lock in.
+     */
+    private function assertNothingDependsOn(InvoiceDocument $document): void
+    {
+        if ($document->status !== DocumentStatus::Issued) {
+            return;
+        }
+
+        $dependants = $this->liveDependants($document, forUpdate: true);
+
+        if ($dependants->isNotEmpty()) {
+            throw new MoloniException(__('Cannot reissue :document while other documents depend on it: :dependants. Cancel them first, or correct it with a credit note instead of reissuing.', [
+                'document' => $document->document_number ?? $document->reference,
+                'dependants' => self::describe($dependants),
+            ]), FailureType::Validation);
+        }
     }
 
     /**

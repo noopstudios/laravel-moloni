@@ -250,7 +250,7 @@ Em concorrência, recibos podem entrar em deadlock (também sobre faturas não r
 
 ### Nota de crédito
 
-Só sobre uma fatura ou fatura-recibo emitida. A referência é a do documento seguida de `/NC{n}`. Cada linha pode ser creditada até à sua quantidade, somando todas as notas de crédito vivas.
+Só sobre uma fatura ou fatura-recibo emitida, ou substituída por uma reemissão depois de chegar ao Moloni (`superseded` com id do Moloni: continua válida lá). A referência é a do documento seguida de `/NC{n}`. Cada linha pode ser creditada até à sua quantidade, somando todas as notas de crédito vivas.
 
 ```php
 // Tudo o que ainda for creditável, em todas as linhas:
@@ -279,9 +279,9 @@ try {
 }
 ```
 
-- Só se anula um documento `issued`. O documento passa a `voided`, deixa de contar, liberta o lugar de fatura viva e liberta o que liquidava.
+- Anula-se um documento `issued` de qualquer tipo (fatura, fatura-recibo, recibo, nota de crédito, pró-forma), ou um documento `superseded` que chegou ao Moloni antes de ser reemitido (tem id do Moloni e continua válido lá). O documento passa a `voided`, deixa de contar, liberta o lugar de fatura viva e liberta o que liquidava; `DocumentVoided` dispara também para um documento substituído.
 - **Não anula em cascata.** Um documento com recibos, notas de crédito ou conversões vivas é recusado sem chamar o Moloni; anule primeiro esses ou emita uma nota de crédito.
-- Quando o Moloni recusa, a exceção (`Validation`) traz a razão dele, e nada é emitido em vez do documento.
+- Quando o Moloni recusa, o documento fica como estava e não se emite nada no lugar dele (por exemplo, uma nota de crédito): decida o passo seguinte.
 - É **síncrono** (chama o Moloni com o lock do documento) e **não pode ser chamado dentro de uma transação de base de dados**: lança `LogicException`. Um resultado incerto é confirmado no Moloni; se não aparecer anulado, lança-se a exceção `Unknown` com o documento inalterado, e voltar a anular é seguro.
 - A razão não pode estar vazia (`InvalidArgumentException`).
 
@@ -292,7 +292,7 @@ $new = Moloni::reissue($document);                       // mesmo tipo, mesmo pa
 $new = Moloni::reissue($document, $payment, dueInDays: 15);
 ```
 
-Substitui uma fatura ou fatura-recibo `issued` ou `unknown` por uma nova, construída com os dados **atuais** do modelo. O documento antigo fica `superseded`; **nada é anulado no Moloni** (um documento emitido continua emitido lá). Não se reemite uma pró-forma.
+Substitui uma fatura ou fatura-recibo `issued` ou `unknown` por uma nova, construída com os dados **atuais** do modelo. O documento antigo fica `superseded`; **nada é anulado no Moloni** (um documento emitido continua emitido lá): anule-o depois com `Moloni::cancel()` ou corrija-o com uma nota de crédito, que continuam a aceitá-lo. Não se reemite uma pró-forma. Uma fatura emitida com recibos ou notas de crédito vivos é recusada (`Validation`): anule-os primeiro ou, em vez de reemitir, corrija-a com uma nota de crédito.
 
 ### Reenviar (`retry`)
 
@@ -464,8 +464,8 @@ Quem tiver uma das duas habilitações (verificadas com `$user->can()`) vê as d
 | `ReconcileDocumentAction` | `unknown` | `Moloni::reconcile()`, com confirmação. |
 | `ConvertProformaAction` | Pró-forma emitida | `Moloni::convert()`: fatura (com prazo) ou fatura-recibo (com método de pagamento). |
 | `ReissueDocumentAction` | Fatura ou fatura-recibo `issued` ou `unknown` | `Moloni::reissue()`; pede a razão quando está emitida. |
-| `CreditNoteAction` | Fatura ou fatura-recibo emitida | `Moloni::creditNote()` com tudo o que ainda é creditável (notas de crédito parciais fazem-se por código). |
-| `CancelDocumentAction` | Fatura ou fatura-recibo emitida | `Moloni::cancel()`, com a razão. |
+| `CreditNoteAction` | Fatura ou fatura-recibo emitida, ou substituída mas válida no Moloni | `Moloni::creditNote()` com tudo o que ainda é creditável (notas de crédito parciais fazem-se por código). |
+| `CancelDocumentAction` | Qualquer documento emitido, ou substituído mas válido no Moloni | `Moloni::cancel()`, com a razão. Se o Moloni recusar anular uma fatura ou fatura-recibo, abre a nota de crédito no seu lugar. |
 
 ## Privacidade e operação
 

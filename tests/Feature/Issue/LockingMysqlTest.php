@@ -19,6 +19,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
+use Noop\Moloni\Data\PaymentData;
 use Noop\Moloni\Enums\DocumentStatus;
 use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Events\DocumentFailed;
@@ -164,4 +165,22 @@ it('returns the pro-forma another transaction committed under the same key after
 
     expect($again->id)->toBe($first?->id)
         ->and(InvoiceDocument::count())->toBe(1);
+})->skip(lmyEnv('DATABASE') === '', LMY_SKIP);
+
+it('refuses to reissue an invoice paid by a receipt committed after the host transaction took its snapshot', function () {
+    $order = Order::create(['customer_vat' => '509999999']);
+    $invoice = InvoiceDocument::factory()->invoice()->issued()->create([
+        'invoiceable_type' => $order->getMorphClass(), 'invoiceable_id' => $order->id,
+        'company_id' => 5, 'document_id' => 8001, 'document_number' => 'GR/8001',
+        'expected_total_cents' => 12300, 'customer_id' => 301, 'customer_vat' => '509999999',
+    ]);
+
+    $e = lmyInStaleTransaction(
+        fn () => Moloni::receipt(Order::create(), [[$invoice, 12300]], new PaymentData('transfer', Carbon::now(), 12300)),
+        fn () => catchMoloniException(fn () => Moloni::reissue($invoice)),
+    );
+
+    expect($e->getMessage())->toContain('Cannot reissue GR/8001')
+        ->and($invoice->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and(InvoiceDocument::where('type', DocumentType::Invoice)->count())->toBe(1);
 })->skip(lmyEnv('DATABASE') === '', LMY_SKIP);

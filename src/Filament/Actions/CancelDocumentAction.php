@@ -18,9 +18,11 @@ use Noop\Moloni\Filament\Actions\Concerns\CallsMoloni;
 use Noop\Moloni\Models\InvoiceDocument;
 
 /**
- * Cancels an issued invoice or invoice-receipt in Moloni (Moloni::cancel()). When Moloni refuses,
- * its reason is shown and the credit note action (CreditNoteAction, in the same table or page)
- * opens in its place, for a full credit note instead.
+ * Cancels an issued document of any type in Moloni, or an invoice superseded by a reissue that is
+ * still valid there (Moloni::cancel()). A document others depend on is refused: cancel the receipt
+ * or credit note first. When Moloni refuses an invoice or invoice-receipt, its reason is shown and
+ * the credit note action (CreditNoteAction, in the same table or page) opens in its place, for a
+ * full credit note instead.
  */
 class CancelDocumentAction extends Action
 {
@@ -39,7 +41,7 @@ class CancelDocumentAction extends Action
         $this->label(__('Cancel in Moloni'))
             ->icon(Heroicon::OutlinedXCircle)
             ->color('danger')
-            ->visible(fn (?InvoiceDocument $record): bool => self::isDocument($record, [DocumentType::Invoice, DocumentType::InvoiceReceipt], [DocumentStatus::Issued]))
+            ->visible(fn (?InvoiceDocument $record): bool => self::isValidInMoloni($record, DocumentType::cases()))
             ->requiresConfirmation()
             ->modalHeading(__('Cancel the document in Moloni'))
             ->modalDescription(__('Moloni annuls the document and it no longer counts. Moloni refuses while other documents depend on it.'))
@@ -57,7 +59,7 @@ class CancelDocumentAction extends Action
                 } catch (MoloniException|InvalidArgumentException|LogicException $e) {
                     $this->notifyRefusal($e);
 
-                    if ($e instanceof MoloniException && self::refusedByMoloni($e, $record)) {
+                    if ($e instanceof MoloniException && self::creditable($record) && self::refusedByMoloni($e, $record)) {
                         $this->offerCreditNote();
                     }
 
@@ -67,14 +69,22 @@ class CancelDocumentAction extends Action
     }
 
     /**
-     * Whether Moloni itself refused, with the document still issued: only Moloni's refusal carries
-     * its errors; local refusals (dependants, a lock) and uncertain outcomes do not.
+     * Whether a credit note can stand in for the cancellation: only an invoice or invoice-receipt.
+     */
+    private static function creditable(InvoiceDocument $record): bool
+    {
+        return in_array($record->type, [DocumentType::Invoice, DocumentType::InvoiceReceipt], true);
+    }
+
+    /**
+     * Whether Moloni itself refused, with the document still issued (or superseded): only Moloni's
+     * refusal carries its errors; local refusals (dependants, a lock) and uncertain outcomes do not.
      */
     private static function refusedByMoloni(MoloniException $e, InvoiceDocument $record): bool
     {
         return $e->type === FailureType::Validation
             && $e->errors !== []
-            && $record->fresh()?->status === DocumentStatus::Issued;
+            && in_array($record->fresh()?->status, [DocumentStatus::Issued, DocumentStatus::Superseded], true);
     }
 
     /**

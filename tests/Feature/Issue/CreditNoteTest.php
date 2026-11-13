@@ -430,9 +430,27 @@ it('refuses to credit what is not an issued invoice or invoice-receipt of this c
     'a pending invoice' => [fn () => cnOrigin(attributes: ['status' => DocumentStatus::Pending, 'document_id' => null])],
     'an unknown invoice' => [fn () => cnOrigin(attributes: ['status' => DocumentStatus::Unknown])],
     'a voided invoice' => [fn () => cnOrigin(attributes: ['status' => DocumentStatus::Voided])],
+    'a superseded invoice that never reached Moloni' => [fn () => cnOrigin(attributes: ['status' => DocumentStatus::Superseded, 'document_id' => null])],
     'issued without a Moloni id' => [fn () => cnOrigin(attributes: ['document_id' => null])],
     'another company' => [fn () => cnOrigin(attributes: ['company_id' => 6])],
     'no frozen lines' => [fn () => cnOrigin(attributes: ['payload' => null])],
+]);
+
+it('credits an invoice superseded by a reissue, which is still valid in Moloni', function (DocumentType $type, int $applied) {
+    cnFake(49.2);
+    $origin = cnOrigin($type, ['status' => DocumentStatus::Superseded]);
+
+    $credit = Moloni::creditNote($origin)->fresh();
+
+    expect($credit?->status)->toBe(DocumentStatus::Issued)
+        ->and($credit?->links()->sole()->associated_document_id)->toBe($origin->id)
+        ->and($credit?->payload['credit']['applied_cents'] ?? null)->toBe($applied)
+        ->and(moloniRequests('creditNotes/insert')[0]['associated_documents'])->toEqual([['associated_id' => 8001, 'value' => $applied / 100]])
+        ->and($origin->fresh()?->status)->toBe(DocumentStatus::Superseded);
+})->with([
+    // An unpaid invoice still owes its total in Moloni.
+    'an invoice' => [DocumentType::Invoice, 4920],
+    'an invoice-receipt' => [DocumentType::InvoiceReceipt, 0],
 ]);
 
 it('judges the origin as stored, not the copy it was given', function () {
