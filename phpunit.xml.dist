@@ -14,7 +14,15 @@
         <testsuite name="DiscoveryOrder">
             <directory>tests/DiscoveryOrder</directory>
         </testsuite>
+        <testsuite name="Integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
     </testsuites>
+    <groups>
+        <exclude>
+            <group>sandbox</group>
+        </exclude>
+    </groups>
     <php>
         <env name="MOLONI_CLIENT_ID" value="(null)" force="true"/>
         <env name="MOLONI_CLIENT_SECRET" value="(null)" force="true"/>

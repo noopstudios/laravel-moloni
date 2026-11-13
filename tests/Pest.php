@@ -14,6 +14,8 @@ use PHPUnit\Framework\Assert;
 
 pest()->extend(DiscoveryOrderTestCase::class)->in('DiscoveryOrder');
 pest()->extend(TestCase::class)->in('Feature', 'Unit');
+// Real calls to a Moloni test company: run only with --group=sandbox (see tests/Integration/SandboxTest.php).
+pest()->extend(TestCase::class)->group('sandbox')->in('Integration');
 
 function useFakeMoloniCredentials(): void
 {
