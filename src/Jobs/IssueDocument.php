@@ -296,6 +296,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
 
         // Committed on its own before the request leaves: from here on the document may exist in
         // Moloni, and a receipt is only looked for there once this is set.
+        $sentBefore = $document->insert_sent_at;
         $document->insert_sent_at = now();
         $document->save();
 
@@ -304,7 +305,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         } catch (MoloniException $e) {
             match ($e->type) {
                 // Only the token request can fail this way, before anything was sent.
-                FailureType::Transient => $this->failBeforeInsert($this->backToPending($document), $e, absentInMoloni: true),
+                FailureType::Transient => $this->failBeforeInsert($this->backToPending($document, $sentBefore), $e, absentInMoloni: true),
                 FailureType::Unknown => $this->settle($document, DocumentStatus::Unknown, $e->type->value, $this->message($e)),
                 default => $this->settle($document, DocumentStatus::Failed, $e->type->value, $this->message($e)),
             };
@@ -722,13 +723,14 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
     }
 
     /**
-     * Nothing was sent: the insert_sent_at mark goes too, so the next run does not look for this
-     * document in Moloni (where it could adopt another one) as if it had been sent.
+     * Nothing was sent by this run: insert_sent_at goes back to what it was before it. A document
+     * never sent before is then not looked for in Moloni (where it could adopt another one) as if
+     * it had been sent; one sent by an earlier run keeps its mark, as that insert may have landed.
      */
-    private function backToPending(InvoiceDocument $document): InvoiceDocument
+    private function backToPending(InvoiceDocument $document, ?Carbon $sentBefore): InvoiceDocument
     {
         $document->status = DocumentStatus::Pending;
-        $document->insert_sent_at = null;
+        $document->insert_sent_at = $sentBefore;
         $document->save();
 
         return $document;

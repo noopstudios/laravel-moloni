@@ -341,7 +341,10 @@ class Moloni
      * invoiceable's current data, with the same type and, unless given, the same payment and term.
      * The old row is marked superseded; nothing is cancelled in Moloni. An issued document that
      * live receipts or credit notes act on is refused (Validation): cancel them first, or correct
-     * the document with a credit note instead of reissuing it.
+     * the document with a credit note instead of reissuing it. Those dependants are locked after
+     * the document, the reverse of retry() and resends: outside a transaction the package retries
+     * its own; inside a host transaction the deadlock surfaces as Laravel's DeadlockException (or a
+     * QueryException) with the host transaction already rolled back: retry the whole unit of work.
      */
     public function reissue(InvoiceDocument $document, ?PaymentData $payment = null, ?int $dueInDays = null): InvoiceDocument
     {

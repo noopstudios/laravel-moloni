@@ -18,10 +18,13 @@ use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Events\DocumentFailed;
 use Noop\Moloni\Events\DocumentIssued;
+use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Facades\Moloni;
+use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Jobs\IssueDocument;
 use Noop\Moloni\Models\InvoiceDocument;
 use Noop\Moloni\Models\InvoiceDocumentLink;
+use Noop\Moloni\MoloniClient;
 use Noop\Moloni\Tests\Fixtures\Order;
 
 use function Pest\Laravel\travelTo;
@@ -606,6 +609,29 @@ it('explains a refused receipt in Portuguese', function () {
 
     expect(fn () => Moloni::receipt(Order::create(), [[$a, 12400]], rpPayment(12400)))
         ->toThrow(InvalidArgumentException::class, 'O valor de 124.00 para GR/8001 excede os 123.00 que a fatura ainda deve.');
+});
+
+it('keeps the sent marker of a receipt sent before when the token request fails on a later run', function () {
+    // Moloni has no receipt that could be this one, so the run goes on to insert it.
+    rpFakeMoloni(30);
+    $receipt = rpSent([[rpInvoice(8001, 12300), 1000], [rpInvoice(8002, 5000), 2000]]);
+    $sentAt = $receipt->insert_sent_at?->toDateTimeString();
+    app()->instance(MoloniClient::class, new class(app(MoloniConnector::class)) extends MoloniClient
+    {
+        public function insert(DocumentType $type, array $payload): int
+        {
+            throw new MoloniException('Could not log in to Moloni.', FailureType::Transient);
+        }
+    });
+
+    expect(catchMoloniException(fn () => runIssueJob($receipt))->type)->toBe(FailureType::Transient);
+
+    $receipt->refresh();
+    // The earlier insert may still have landed: the next run must look for it in Moloni again.
+    expect($receipt->status)->toBe(DocumentStatus::Pending)
+        ->and($sentAt)->not->toBeNull()
+        ->and($receipt->insert_sent_at?->toDateTimeString())->toBe($sentAt)
+        ->and(moloniRequests('receipts/insert'))->toHaveCount(0);
 });
 
 it('adopts a receipt that already landed in Moloni instead of inserting again', function (DocumentStatus $status) {
