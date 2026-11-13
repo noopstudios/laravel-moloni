@@ -721,9 +721,14 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         $this->settle($document, $absent ? DocumentStatus::Failed : DocumentStatus::Unknown, $e->type->value, $this->message($e));
     }
 
+    /**
+     * Nothing was sent: the insert_sent_at mark goes too, so the next run does not look for this
+     * document in Moloni (where it could adopt another one) as if it had been sent.
+     */
     private function backToPending(InvoiceDocument $document): InvoiceDocument
     {
         $document->status = DocumentStatus::Pending;
+        $document->insert_sent_at = null;
         $document->save();
 
         return $document;

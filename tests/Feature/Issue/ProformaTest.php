@@ -2,6 +2,7 @@
 
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -217,6 +218,59 @@ it('sends a failed pro-forma again when its key is requested again', function ()
         ->and(InvoiceDocument::count())->toBe(1);
     Queue::assertPushed(IssueDocument::class, fn (IssueDocument $job) => $job->document->is($first));
 });
+
+it('returns the final state when the queue runs the job at once', function () {
+    // useIssueSettings() puts the package on the sync queue connection.
+    $nextId = 6001;
+    pfFake(['*/proFormaInvoices/insert/*' => function () use (&$nextId) {
+        return Http::response(['valid' => 1, 'document_id' => $nextId++]);
+    }]);
+    $order = Order::create(['customer_vat' => '509999999']);
+
+    $proforma = Moloni::proforma($order, 'quote-1');
+    $converted = Moloni::convert($proforma);
+
+    expect($proforma->status)->toBe(DocumentStatus::Issued)
+        ->and($proforma->document_id)->toBe(6001)
+        ->and($converted->status)->toBe(DocumentStatus::Issued)
+        ->and($converted->document_id)->toBe(7001);
+
+    $failed = Moloni::proforma($order, 'quote-2');
+    // As if it had failed before its insert was sent.
+    $failed->fill(['status' => DocumentStatus::Failed, 'document_id' => null, 'document_number' => null, 'insert_sent_at' => null])->save();
+
+    $again = Moloni::proforma($order, 'quote-2');
+
+    expect($again->is($failed))->toBeTrue()
+        ->and($again->status)->toBe(DocumentStatus::Issued)
+        ->and($again->document_id)->toBe(6003);
+});
+
+it('retries a failed conversion only while its pro-forma is issued and not being cancelled', function (Closure $meanwhile, ?string $refusal) {
+    Queue::fake();
+    $proforma = pfWith(['status' => DocumentStatus::Issued, 'document_id' => 6001, 'document_number' => 'PF/1']);
+    $conversion = Moloni::convert($proforma);
+    $conversion->fill(['status' => DocumentStatus::Failed, 'error_type' => 'validation'])->save();
+    $meanwhile($proforma);
+
+    if ($refusal === null) {
+        Moloni::retry($conversion);
+        expect($conversion->fresh()?->status)->toBe(DocumentStatus::Pending);
+
+        return;
+    }
+
+    $e = catchMoloniException(fn () => Moloni::retry($conversion));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain($refusal)
+        ->and($conversion->fresh()?->status)->toBe(DocumentStatus::Failed);
+    Queue::assertPushed(IssueDocument::class, 2);
+})->with([
+    'an issued pro-forma' => [fn (InvoiceDocument $proforma) => null, null],
+    'a voided pro-forma' => [fn (InvoiceDocument $proforma) => $proforma->fill(['status' => DocumentStatus::Voided])->save(), 'is no longer issued'],
+    'a pro-forma being cancelled' => [fn (InvoiceDocument $proforma) => Cache::lock("moloni-cancel-{$proforma->id}", 150)->get(), 'being processed'],
+]);
 
 it('refuses an empty pro-forma key', function () {
     Queue::fake();

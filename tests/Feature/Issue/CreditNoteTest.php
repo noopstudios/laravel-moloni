@@ -199,6 +199,16 @@ it('issues a full credit note referencing every line of the invoice', function (
     Event::assertDispatched(DocumentIssued::class, fn (DocumentIssued $event) => $event->document->is($credit));
 });
 
+it('returns the final state when the queue runs the job at once', function () {
+    // useIssueSettings() puts the package on the sync queue connection.
+    cnFake(49.2);
+
+    $credit = Moloni::creditNote(cnOrigin());
+
+    expect($credit->status)->toBe(DocumentStatus::Issued)
+        ->and($credit->document_id)->toBe(9501);
+});
+
 it('issues a partial credit note for one line and a smaller quantity', function () {
     cnFake(6.15);
     $origin = cnOrigin();

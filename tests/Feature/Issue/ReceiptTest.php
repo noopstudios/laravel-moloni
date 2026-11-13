@@ -2,6 +2,7 @@
 
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Illuminate\Database\DeadlockException;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
@@ -188,6 +189,17 @@ it('issues one receipt for three invoices with a value per invoice', function ()
         ->toBe([[$a->id, 12300], [$b->id, 2000], [$c->id, 2000]])
         ->and([$a->outstandingCents(), $b->outstandingCents(), $c->outstandingCents()])->toBe([0, 3000, 0]);
     Event::assertDispatched(DocumentIssued::class, fn (DocumentIssued $event) => $event->document->is($receipt));
+});
+
+it('returns the final state when the queue runs the job at once', function () {
+    // useIssueSettings() puts the package on the sync queue connection.
+    rpFakeMoloni(100, receiptSettles: [8001 => 100.0]);
+    $a = rpInvoice(8001, 12300);
+
+    $receipt = Moloni::receipt(Order::create(), [[$a, 10000]], rpPayment(10000));
+
+    expect($receipt->status)->toBe(DocumentStatus::Issued)
+        ->and($receipt->document_id)->toBe(9001);
 });
 
 it('records the receipt pending with its frozen request before any HTTP call', function () {
@@ -550,6 +562,32 @@ it('sends a failed receipt again when it is requested again with its key', funct
     expect(catchMoloniException(fn () => Moloni::receipt($order, [[$a, 10000]], rpPayment(10000), 'payment-3'))->type)->toBe(FailureType::Validation)
         ->and($receipt->fresh()?->status)->toBe(DocumentStatus::Failed);
     Http::assertNothingSent();
+});
+
+it('retries its own transaction when sending a failed receipt again deadlocks', function () {
+    Http::fake();
+    Queue::fake();
+    $a = rpInvoice(8001, 12300);
+    $order = Order::create();
+    $receipt = Moloni::receipt($order, [[$a, 10000]], rpPayment(10000), 'payment-4');
+    $receipt->fill(['status' => DocumentStatus::Failed, 'attempts' => 1])->save();
+    (new UniqueLock(app(CacheRepository::class)))->release(new IssueDocument($receipt));
+    $thrown = 0;
+    // The first locking read of the resend: the receipt's own row.
+    DB::connection()->beforeExecuting(function (string $query, array $bindings) use (&$thrown, $receipt) {
+        if ($thrown === 0 && str_starts_with($query, 'select') && str_contains($query, 'from "invoice_documents" where "invoice_documents"."id" = ?') && $bindings === [$receipt->id]) {
+            $thrown++;
+
+            throw new DeadlockException('Deadlock found when trying to get lock; try restarting transaction');
+        }
+    });
+
+    $again = Moloni::receipt($order, [[$a, 10000]], rpPayment(10000), 'payment-4');
+
+    expect($thrown)->toBe(1)
+        ->and($again->is($receipt))->toBeTrue()
+        ->and($again->status)->toBe(DocumentStatus::Pending);
+    Queue::assertPushed(IssueDocument::class, 2);
 });
 
 it('refuses an idempotency key that does not fit the operation key', function () {

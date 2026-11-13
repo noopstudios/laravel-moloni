@@ -278,8 +278,12 @@ class Moloni
             return;
         }
 
+        $connection = $receipt->getConnection();
+
         try {
-            $resent = $receipt->getConnection()->transaction(function () use ($receipt) {
+            // It locks the receipt or credit note before its documents, the reverse of new ones:
+            // a deadlock is retried when the package owns the transaction.
+            $resent = $connection->transaction(function () use ($receipt) {
                 $current = InvoiceDocument::query()->whereKey($receipt->getKey())->lockForUpdate()->firstOrFail();
 
                 if ($current->status !== DocumentStatus::Failed) {
@@ -289,7 +293,7 @@ class Moloni
                 $this->resetForResend($current);
 
                 return true;
-            });
+            }, $connection->transactionLevel() === 0 ? self::DEADLOCK_ATTEMPTS : 1);
         } finally {
             $lock->release();
             $receipt->refresh();
@@ -303,10 +307,24 @@ class Moloni
     /**
      * Puts a locked failed row back to Pending with its attempts counted from zero; a receipt only
      * while its allocations still fit what its invoices owe, a credit note only while its lines and
-     * claim still fit its document.
+     * claim still fit its document, a conversion only while its pro-forma is issued and not being
+     * cancelled (Moloni would refuse the association anyway).
      */
     private function resetForResend(InvoiceDocument $current): void
     {
+        $converts = $current->payload['converts'] ?? null;
+
+        if (is_array($converts)) {
+            // The conversion, then its pro-forma: the order reissue() locks them in.
+            $proforma = InvoiceDocument::query()->whereKey((int) Payload::required($converts, 'proforma_document_id', 'conversion'))->lockForUpdate()->first();
+
+            if ($proforma === null || $proforma->status !== DocumentStatus::Issued) {
+                throw new MoloniException(__('The pro-forma converted by :reference is no longer issued.', ['reference' => $current->reference]), FailureType::Validation);
+            }
+
+            IssueDocument::assertNotBeingCancelled($proforma);
+        }
+
         if ($current->type === DocumentType::Receipt) {
             $this->receipts->assertStillFits($current);
         }
@@ -393,8 +411,12 @@ class Moloni
     public function retry(InvoiceDocument $document): void
     {
         $this->whileHolding($document, function () use ($document) {
+            $connection = $document->getConnection();
+
             try {
-                $document->getConnection()->transaction(function () use ($document) {
+                // It locks the document before what it settles or converts, the reverse of new
+                // receipts and credit notes: a deadlock is retried when the package owns the transaction.
+                $connection->transaction(function () use ($document) {
                     // The caller's copy may be stale: the status is checked on the locked row.
                     $current = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
 
@@ -403,7 +425,7 @@ class Moloni
                     }
 
                     $this->resetForResend($current);
-                });
+                }, $connection->transactionLevel() === 0 ? self::DEADLOCK_ATTEMPTS : 1);
             } catch (UniqueConstraintViolationException) {
                 throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $document->reference]), FailureType::Validation);
             } finally {
@@ -697,6 +719,11 @@ class Moloni
             throw new MoloniException(__('The document :reference has not been issued in Moloni.', ['reference' => $document->reference]), FailureType::Validation);
         }
 
+        // Every read goes to the configured company, which would look up another company's id.
+        if ($document->company_id !== app(MoloniSettings::class)->companyIdOrNull()) {
+            throw new MoloniException(__('The document :document was issued for another Moloni company.', ['document' => $document->document_number ?? $document->reference]), FailureType::Validation);
+        }
+
         return $this->client->pdfLink($document->document_id);
     }
 
@@ -766,6 +793,11 @@ class Moloni
 
         if ($type === DocumentType::Invoice && ! isset($settings->maturity_dates[$dueInDays])) {
             throw new MoloniException(__('No maturity date is configured for :days days.', ['days' => $dueInDays]), FailureType::Validation);
+        }
+
+        if ($reference === null && trim($invoiceable->invoiceReference()) === '') {
+            // Every such document would carry the reference "#", and reconciliation could not tell them apart.
+            throw new MoloniException(__('The invoiceable has no reference to issue the document with.'), FailureType::Validation);
         }
 
         $vat = $invoice->customer->vat;
@@ -880,9 +912,14 @@ class Moloni
         return $invoiceable;
     }
 
+    /**
+     * Queues the issuing job and refreshes the caller's copy: on a `sync` connection outside a
+     * transaction the job has already run, and the caller gets the final state.
+     */
     protected function dispatch(InvoiceDocument $document): void
     {
         IssueDocument::dispatch($document);
+        $document->refresh();
     }
 
     /**

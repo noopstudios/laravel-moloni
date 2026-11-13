@@ -104,6 +104,30 @@ it('fails the job when the maturity date was removed after the request', functio
         ->and(moloniRequests('invoices/insert'))->toHaveCount(0);
 });
 
+it('returns the final state when the queue runs the job at once', function () {
+    // useIssueSettings() puts the package on the sync queue connection.
+    fakeMoloniIssuing(['*/documents/getOne/*' => moloniDocumentRow(['document_set_id' => 41])]);
+
+    $document = Moloni::invoice(Order::create(['customer_vat' => '509999999']));
+
+    expect($document->status)->toBe(DocumentStatus::Issued)
+        ->and($document->document_id)->toBe(7001)
+        ->and($document->document_number)->toBe('GR/8');
+});
+
+it('refuses an invoiceable without a reference before recording anything', function (string $reference) {
+    Http::fake();
+    Queue::fake();
+    Order::$referenceUsing = fn () => $reference;
+
+    $e = catchMoloniException(fn () => Moloni::invoice(Order::create(['customer_vat' => '509999999'])));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('no reference')
+        ->and(InvoiceDocument::count())->toBe(0);
+    Queue::assertNothingPushed();
+})->with(['empty' => [''], 'blank' => ['   ']]);
+
 it('refuses a negative term', function () {
     Queue::fake();
 

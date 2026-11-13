@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Database\DeadlockException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
@@ -41,6 +42,28 @@ beforeEach(function () {
 function irPayment(int $cents = 12300, string $method = 'card'): PaymentData
 {
     return new PaymentData($method, Carbon::parse('2026-05-04 09:30:00'), $cents);
+}
+
+/**
+ * Makes the next read of invoice_documents fail once with a deadlock, as InnoDB reports it.
+ * Returns how many deadlocks were thrown.
+ *
+ * @return Closure(): int
+ */
+function irDeadlockOnce(): Closure
+{
+    $thrown = 0;
+    DB::connection()->beforeExecuting(function (string $query) use (&$thrown) {
+        if ($thrown === 0 && str_starts_with($query, 'select') && str_contains($query, 'from "invoice_documents"')) {
+            $thrown++;
+
+            throw new DeadlockException('Deadlock found when trying to get lock; try restarting transaction');
+        }
+    });
+
+    return function () use (&$thrown): int {
+        return $thrown;
+    };
 }
 
 /**
@@ -276,6 +299,8 @@ it('keeps a sync-dispatched document pending when its first attempt fails transi
     expect($e->type)->toBe(FailureType::Transient)
         ->and($document->status)->toBe(DocumentStatus::Pending)
         ->and($document->attempts)->toBe(1)
+        // Nothing left: the next run must not look for it in Moloni as if it had been sent.
+        ->and($document->insert_sent_at)->toBeNull()
         ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
     Event::assertNotDispatched(DocumentFailed::class);
 });
@@ -399,6 +424,8 @@ it('puts the document back to pending when the token request fails before the in
     expect($e->type)->toBe(FailureType::Transient)
         ->and($document->status)->toBe(DocumentStatus::Pending)
         ->and($document->attempts)->toBe(1)
+        // Nothing left: the next run must not look for it in Moloni as if it had been sent.
+        ->and($document->insert_sent_at)->toBeNull()
         ->and(moloniRequests('invoiceReceipts/insert'))->toHaveCount(0);
     Event::assertNotDispatched(DocumentFailed::class);
 });
@@ -581,6 +608,29 @@ it('retries a failed document on the same row', function () {
     Queue::assertPushed(IssueDocument::class, fn (IssueDocument $job) => $job->document->is($document));
 });
 
+it('retries its own transaction when retrying deadlocks', function () {
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Failed])->save();
+    Queue::fake();
+    $deadlocks = irDeadlockOnce();
+
+    Moloni::retry($document);
+
+    expect($deadlocks())->toBe(1)
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Pending);
+    Queue::assertPushed(IssueDocument::class, 1);
+});
+
+it('lets a deadlock while retrying reach the caller inside a host transaction', function () {
+    $document = irPending();
+    $document->fill(['status' => DocumentStatus::Failed])->save();
+    $deadlocks = irDeadlockOnce();
+
+    expect(fn () => DB::transaction(fn () => Moloni::retry($document)))->toThrow(DeadlockException::class)
+        ->and($deadlocks())->toBe(1)
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Failed);
+});
+
 it('retries only failed documents that do not collide with a live one', function () {
     $order = Order::create(['customer_vat' => '509999999']);
     $failed = InvoiceDocument::factory()->invoice()->failed()->for($order, 'invoiceable')->create();
@@ -685,6 +735,17 @@ it('asks Moloni for the PDF link every time and never stores it', function () {
         ->and($document->fresh()?->getAttributes())->toBe($before)
         ->and(json_encode(InvoiceDocument::first()?->getAttributes()))->not->toContain('moloni.test');
     Http::assertSent(fn (Request $request) => str_contains($request->url(), '/documents/getPDFLink/') && $request['document_id'] === 7001);
+});
+
+it('refuses a PDF link for a document of another Moloni company', function () {
+    Http::fake();
+    $document = InvoiceDocument::factory()->invoice()->issued()->create(['company_id' => 6, 'document_id' => 7001]);
+
+    $e = catchMoloniException(fn () => Moloni::pdfLink($document));
+
+    expect($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('another Moloni company');
+    Http::assertNothingSent();
 });
 
 it('asks for a PDF link only for issued documents', function () {
