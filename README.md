@@ -114,7 +114,7 @@ Um `Invoiceable` é um modelo Eloquent (uma encomenda, uma reserva, um período 
 
 - `toInvoiceData()`: o cliente e as linhas a faturar. É lido uma só vez, quando o documento é pedido, e fica congelado na linha do documento.
 - `invoiceReference()`: a referência da aplicação (ex.: o número da encomenda). No Moloni fica como `#referência`.
-- `customerKey()`: o id estável do cliente da aplicação. Faz parte do número do cliente no Moloni.
+- `customerKey()`: o id estável do cliente da aplicação. O pacote não o chama: o número do cliente no Moloni é construído a partir de `CustomerData::$key`, por isso passe-o aí (como no exemplo abaixo).
 
 ```php
 use Illuminate\Database\Eloquent\Model;
@@ -391,7 +391,7 @@ A regra predefinida:
 - UE, cliente particular ou sem NIF, ou VIES desligado: a taxa normal;
 - UE, empresa com NIF e VIES ligado: consulta o VIES. NIF válido: isento (`eu_business`); NIF inválido: a taxa normal; VIES indisponível: depende da definição **When VIES cannot be reached** (`vies_unavailable`): `charge` cobra IVA (e guarda o resultado) e `block` lança uma `MoloniException` (`Validation`) a pedir para tentar mais tarde.
 
-**Motivos de isenção.** Nas definições, "VAT exemptions" guarda o código AT para cada cenário. Os valores iniciais são `M40` (empresa da UE), `M40` (empresa fora da UE) e `M44` (consumidor fora da UE). **Confirme estes códigos com o seu contabilista** antes de emitir; o pacote não os valida juridicamente, apenas confirma que existem no Moloni.
+**Motivos de isenção.** Nas definições, "VAT exemptions" guarda o código AT para cada cenário. Os valores iniciais são `M40` (empresa da UE), `M40` (empresa fora da UE) e `M44` (consumidor fora da UE). **Confirme estes códigos com o seu contabilista** antes de emitir; o pacote não os valida juridicamente, apenas confirma que existem no Moloni. Se o código de um cenário estiver vazio, a `DefaultTaxRule` lança uma `MoloniException` (`Validation`) em vez de decidir sem motivo de isenção.
 
 O VIES liga-se com `MOLONI_VIES_ENABLED=true`. A consulta nunca lança exceções nem usa cache: qualquer falha (timeout, erro HTTP, resposta de serviço indisponível) conta como "indisponível".
 
@@ -418,9 +418,9 @@ it('handles a lost answer', function () {
 });
 ```
 
-- Os pedidos são validados, registados e congelados como de costume, e a linha é emitida de imediato: sem HTTP, sem fila, sem credenciais Moloni e sem definições configuradas (o fake traz as suas). Os eventos do pacote disparam. Os números dos documentos são `FAKE/{id}` a partir de 1000, e `pdfLink()` devolve uma ligação fixa.
+- Os pedidos são validados, registados e congelados como de costume, e a linha é emitida de imediato: sem HTTP, sem fila, sem credenciais Moloni e sem definições configuradas (o fake traz as suas). Os eventos do pacote disparam. Os números dos documentos são `FAKE/{id}` a partir de 1000, e `pdfLink()` devolve uma ligação fictícia.
 - Asserções: `assertIssued(DocumentType $type, ?Closure $callback = null)`, `assertNothingIssued()` e `assertIssuedCount(int $n)`.
-- `failNext(FailureType $type)` faz o **pedido seguinte** terminar como o fluxo real o deixaria (`Unknown` fica `unknown`; os outros tipos ficam `failed`) e dispara `DocumentFailed`. Só afeta esse pedido.
+- `failNext(FailureType $type)` faz o **pedido seguinte** terminar como o fluxo real o deixaria (`Unknown` fica `unknown`; os outros tipos ficam `failed`) e dispara `DocumentFailed`. Só afeta esse pedido; um pedido que devolva um documento já existente ou que seja recusado também o consome.
 - Limites: o fake não fala com o Moloni, por isso não valida impostos, isenções, clientes nem produtos; `cancel()` não anula nada no Moloni; e não simula retentativas nem reconciliação real (`reconcile()` volta a emitir a linha). O fake substitui o binding de `MoloniSettings` por um objeto próprio, mas as verificações do pacote continuam a ler a tabela de definições, pelo que **a tabela `settings` do spatie tem de existir** na base de dados de testes (corra as migrações).
 
 ## Fila e infraestrutura

@@ -21,7 +21,9 @@ interface Invoiceable
     public function invoiceReference(): string;
 
     /**
-     * The application's stable id for the billing customer.
+     * The application's stable id for the billing customer. The package does not call it: the
+     * Moloni customer number is built from CustomerData::$key, so pass this value there (in
+     * toInvoiceData()).
      */
     public function customerKey(): string;
 }
