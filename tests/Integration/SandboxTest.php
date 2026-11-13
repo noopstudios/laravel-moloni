@@ -153,7 +153,7 @@ it('issues an invoice-receipt and fetches its PDF link', function () {
 
     // Never stored: Moloni's links expire.
     expect($url)->toStartWith('https://')
-        ->and(str_contains((string) json_encode($document->fresh()?->getAttributes()), $url))->toBeFalse();
+        ->and(sandboxHolds($document->fresh()?->getAttributes() ?? [], $url))->toBeFalse();
 });
 
 it('issues an invoice, then one receipt for two invoices', function () {
@@ -443,6 +443,28 @@ function sandboxFreshVat(): string
     $check = $check >= 10 ? 0 : $check;
 
     return $digits.(($check + 1) % 10);
+}
+
+/**
+ * Whether any value holds the text, also inside values stored as JSON (e.g. the payload).
+ *
+ * @param  array<array-key, mixed>  $values
+ */
+function sandboxHolds(array $values, string $text): bool
+{
+    foreach ($values as $value) {
+        if (is_string($value)) {
+            $decoded = json_decode($value, true);
+
+            if (str_contains($value, $text) || (is_array($decoded) && sandboxHolds($decoded, $text))) {
+                return true;
+            }
+        } elseif (is_array($value) && sandboxHolds($value, $text)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 /**
