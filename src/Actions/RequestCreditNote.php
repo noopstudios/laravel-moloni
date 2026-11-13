@@ -440,13 +440,14 @@ class RequestCreditNote
      * Every credit note of a document with the origin's reference in its company, whatever its
      * status: a reissue or a conversion carries the same reference, and two credit notes with
      * the same reference could be taken for each other when reconciling. Read with FOR UPDATE
-     * through joins (see remaining()) and counted here: PostgreSQL refuses FOR UPDATE on an aggregate.
+     * through joins (see remaining()), from the documents' (company_id, reference) index so only
+     * theirs are locked, and counted here: PostgreSQL refuses FOR UPDATE on an aggregate.
      */
     private function creditNotesSharingReference(InvoiceDocument $origin): int
     {
-        return $origin->getConnection()->table('invoice_document_links', 'l')
+        return $origin->getConnection()->table('invoice_documents', 'o')
+            ->join('invoice_document_links as l', 'l.associated_document_id', '=', 'o.id')
             ->join('invoice_documents as s', 's.id', '=', 'l.document_id')
-            ->join('invoice_documents as o', 'o.id', '=', 'l.associated_document_id')
             ->where('s.type', DocumentType::CreditNote->value)
             ->where('o.reference', $origin->reference)
             ->where('o.company_id', $origin->company_id)
