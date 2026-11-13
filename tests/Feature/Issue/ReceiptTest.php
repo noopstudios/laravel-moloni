@@ -2,8 +2,11 @@
 
 use Illuminate\Bus\UniqueLock;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -478,31 +481,47 @@ it('returns the same receipt for the same idempotency key and refuses other allo
     Http::assertNothingSent();
 });
 
-it('returns the receipt a concurrent call with the same key committed while this one waited for the invoices', function () {
+// A same-key call committing while this one waits is in ReceiptMysqlTest (two real transactions).
+
+it('never looks up a key when the caller gave none', function () {
+    Queue::fake();
+    $a = rpInvoice(8001, 12300);
+    $queries = [];
+    DB::listen(function (QueryExecuted $query) use (&$queries) {
+        $queries[] = $query->sql;
+    });
+
+    Moloni::receipt(Order::create(), [[$a, 1000]], rpPayment(1000));
+
+    expect(collect($queries)->filter(fn (string $sql) => str_contains($sql, 'operation_key') && str_starts_with(strtolower($sql), 'select'))->all())->toBe([]);
+});
+
+it('returns the receipt of a repeated key even when the receipt settings changed since', function () {
+    Queue::fake();
+    $a = rpInvoice(8001, 12300);
+    $order = Order::create();
+    $first = Moloni::receipt($order, [[$a, 1000]], rpPayment(1000), 'payment-5');
+    useMoloniSettings(['document_sets' => ['invoice' => 41], 'payment_methods' => ['card' => 21]]);
+
+    expect(Moloni::receipt($order, [[$a, 1000]], rpPayment(1000), 'payment-5')->is($first))->toBeTrue();
+});
+
+it('returns a failed receipt requested again while another call is sending it again', function () {
     Http::fake();
     Queue::fake();
     $a = rpInvoice(8001, 12300);
     $order = Order::create();
-    $concurrent = null;
-    $fired = false;
-    // Fires when the call reads the invoices under lock, after its own lookup by key found nothing:
-    // the other call (here a savepoint inside the first) records the same receipt first.
-    InvoiceDocument::retrieved(function (InvoiceDocument $document) use (&$concurrent, &$fired, $a, $order) {
-        if ($fired || $document->id !== $a->id) {
-            return;
-        }
+    $receipt = Moloni::receipt($order, [[$a, 1000]], rpPayment(1000), 'payment-6');
+    $receipt->fill(['status' => DocumentStatus::Failed, 'error_type' => 'validation'])->save();
+    $lock = Cache::lock("moloni-doc-{$receipt->id}", 150);
+    $lock->get();
 
-        $fired = true;
-        $concurrent = Moloni::receipt($order, [[$a, 12300]], rpPayment(12300), 'payment-9');
-    });
+    $again = Moloni::receipt($order, [[$a, 1000]], rpPayment(1000), 'payment-6');
 
-    $receipt = Moloni::receipt($order, [[$a, 12300]], rpPayment(12300), 'payment-9');
-
-    expect($concurrent)->toBeInstanceOf(InvoiceDocument::class)
-        ->and($receipt->is($concurrent))->toBeTrue()
-        ->and(InvoiceDocument::where('type', DocumentType::Receipt)->count())->toBe(1)
-        ->and(InvoiceDocumentLink::count())->toBe(1);
+    expect($again->is($receipt))->toBeTrue()
+        ->and($again->status)->toBe(DocumentStatus::Failed);
     Queue::assertPushed(IssueDocument::class, 1);
+    $lock->release();
 });
 
 it('sends a failed receipt again when it is requested again with its key', function () {

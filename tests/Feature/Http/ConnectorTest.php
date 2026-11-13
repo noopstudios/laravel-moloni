@@ -485,4 +485,23 @@ it('caps the HTTP timeouts so the time guard of the issuing job holds', function
 })->with([
     'within the caps' => [15, 5, 15, 5],
     'above the caps' => [120, 60, 30, 10],
+    'zero' => [0, 0, 1, 1],
 ]);
+
+it('never sends the token request without a timeout', function () {
+    config(['moloni.timeout' => 0, 'moloni.connect_timeout' => 'none']);
+    $seen = [];
+    Http::fake(function (Request $request, array $options) use (&$seen) {
+        if (str_contains($request->url(), '/grant/')) {
+            $seen = [$options['timeout'] ?? null, $options['connect_timeout'] ?? null];
+
+            return Http::response(moloniGrant());
+        }
+
+        return Http::response([]);
+    });
+
+    connectorWithCompany(5)->read('customers/getAll', []);
+
+    expect($seen)->toBe([1, 5]);
+});

@@ -24,6 +24,10 @@ use Noop\Moloni\Support\Payload;
  * what the invoice still owes, and the pending receipt and its links are written in the same
  * transaction: a pending receipt already counts against the invoices, so a concurrent request for
  * the same money fails here.
+ *
+ * The locking reads can deadlock with other receipts, even on unrelated invoices (InnoDB gap
+ * locks). When the package owns the outermost transaction it is retried; inside a host
+ * transaction the deadlock propagates, since the database already rolled that transaction back.
  */
 class RequestReceipt
 {
@@ -32,6 +36,9 @@ class RequestReceipt
 
     /** Reconciliation reads every invoice in turn, within the issuing job's time budget. */
     public const MAX_INVOICES = 25;
+
+    /** Tries of a transaction the package owns, when it deadlocks. */
+    private const DEADLOCK_ATTEMPTS = 3;
 
     /** The width of invoice_documents.operation_key. */
     private const MAX_OPERATION_KEY_LENGTH = 255;
@@ -69,6 +76,16 @@ class RequestReceipt
             throw new InvalidArgumentException(Message::get('The receipt idempotency key is too long.'));
         }
 
+        if ($idempotencyKey !== null) {
+            // A plain read, before the settings: a repeated call gets its receipt even if the
+            // settings changed since. A concurrent first call is caught by the unique key below.
+            $existing = $this->sameRequest(InvoiceDocument::query()->where('operation_key', $operationKey)->first(), $requested, $payment, $idempotencyKey);
+
+            if ($existing !== null) {
+                return [$existing, false];
+            }
+        }
+
         $settings = app(MoloniSettings::class);
         $companyId = $settings->companyIdOrNull()
             ?? throw new MoloniException(Message::get('No Moloni company is configured.'), FailureType::Validation);
@@ -79,20 +96,12 @@ class RequestReceipt
             throw new MoloniException(Message::get('The payment method :method is not configured.', ['method' => $payment->method]), FailureType::Validation);
         }
 
+        // On the documents' connection: the owner may live on another one.
+        $connection = (new InvoiceDocument)->getConnection();
+
         try {
-            // On the documents' connection: the owner may live on another one.
-            return (new InvoiceDocument)->getConnection()->transaction(function () use ($owner, $requested, $payment, $operationKey, $idempotencyKey, $companyId, $documentSetId) {
+            return $connection->transaction(function () use ($owner, $requested, $payment, $operationKey, $companyId, $documentSetId) {
                 $invoices = $this->lockInvoices(array_keys($requested));
-
-                // Only now, and as a locking read: a concurrent call with the same key may have
-                // committed the receipt while this one waited, and its links take up the balance.
-                $existing = $this->existing($operationKey, $requested, $payment, $idempotencyKey);
-
-                if ($existing !== null) {
-                    return [$existing, false];
-                }
-
-                $this->assertSettleable($invoices, $requested, $companyId);
                 $first = $invoices->firstOrFail();
 
                 $receipt = new InvoiceDocument([
@@ -118,7 +127,12 @@ class RequestReceipt
                     ],
                 ]);
                 $receipt->invoiceable()->associate($owner);
+                // Before the balance is read: a concurrent call with the same key that committed
+                // while this one waited for the invoices fails here on the unique key, not on the
+                // balance its links take. The row carries no links yet, so it settles nothing.
                 $receipt->save();
+
+                $this->assertSettleable($invoices, $requested, $companyId);
 
                 foreach ($invoices as $invoice) {
                     InvoiceDocumentLink::create([
@@ -129,10 +143,17 @@ class RequestReceipt
                 }
 
                 return [$receipt, true];
-            });
+            }, $connection->transactionLevel() === 0 ? self::DEADLOCK_ATTEMPTS : 1);
         } catch (UniqueConstraintViolationException $e) {
-            // A concurrent call with the same idempotency key created it first.
-            return [$this->existing($operationKey, $requested, $payment, $idempotencyKey) ?? throw $e, false];
+            if ($idempotencyKey === null) {
+                throw $e;
+            }
+
+            // A call with the same key committed it first. A locking read sees it even under a
+            // host transaction's older snapshot; the row exists, so no gap is locked.
+            $existing = InvoiceDocument::query()->where('operation_key', $operationKey)->lockForUpdate()->first();
+
+            return [$this->sameRequest($existing, $requested, $payment, $idempotencyKey) ?? throw $e, false];
         }
     }
 
@@ -234,15 +255,13 @@ class RequestReceipt
     }
 
     /**
-     * The receipt already recorded under the operation key (a locking read), when it is the same
-     * request: the same invoices and amounts, total and payment method.
+     * The receipt already recorded under the idempotency key, when it is the same request: the
+     * same invoices and amounts, total and payment method. Another request under the key is refused.
      *
      * @param  array<int, int>  $requested
      */
-    private function existing(string $operationKey, array $requested, PaymentData $payment, ?string $idempotencyKey): ?InvoiceDocument
+    private function sameRequest(?InvoiceDocument $existing, array $requested, PaymentData $payment, string $idempotencyKey): ?InvoiceDocument
     {
-        $existing = InvoiceDocument::query()->where('operation_key', $operationKey)->lockForUpdate()->first();
-
         if ($existing === null) {
             return null;
         }
@@ -259,7 +278,7 @@ class RequestReceipt
         $storedMethod = $existing->payload['payment']['method'] ?? null;
 
         if ($stored !== $requested || $existing->expected_total_cents !== $payment->amountCents || $storedMethod !== $payment->method) {
-            throw new InvalidArgumentException(Message::get('The receipt key :key already belongs to another receipt; use a new key.', ['key' => (string) $idempotencyKey]));
+            throw new InvalidArgumentException(Message::get('The receipt key :key already belongs to another receipt; use a new key.', ['key' => $idempotencyKey]));
         }
 
         return $existing;

@@ -24,6 +24,15 @@ class MoloniConnector
     public const MAX_CONNECT_TIMEOUT = 10;
 
     /**
+     * A configured timeout as whole seconds between 1 and $max: zero or a non-number would mean
+     * "no timeout" to the HTTP client, and the issuing job's time guard assumes short requests.
+     */
+    public static function seconds(mixed $configured, int $max): int
+    {
+        return max(1, min(is_numeric($configured) ? (int) $configured : $max, $max));
+    }
+
+    /**
      * @param  (Closure(): ?int)|null  $companyId
      */
     public function __construct(
@@ -115,8 +124,8 @@ class MoloniConnector
 
         try {
             // Capped: the issuing job never sends an insert after 110 s of a 120 s timeout.
-            $response = Http::timeout(min((int) config('moloni.timeout'), self::MAX_TIMEOUT))
-                ->connectTimeout(min((int) config('moloni.connect_timeout'), self::MAX_CONNECT_TIMEOUT))
+            $response = Http::timeout(self::seconds(config('moloni.timeout'), self::MAX_TIMEOUT))
+                ->connectTimeout(self::seconds(config('moloni.connect_timeout'), self::MAX_CONNECT_TIMEOUT))
                 ->withQueryParameters(['access_token' => $token, 'json' => 'true', 'human_errors' => 'true'])
                 ->post($this->url($endpoint), $params);
         } catch (StrayRequestException) {

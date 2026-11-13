@@ -185,10 +185,13 @@ class Moloni
      * invoices, amounts or method under that key are refused, since the key already belongs to
      * another receipt.
      *
-     * At most RequestReceipt::MAX_INVOICES invoices per receipt. The invoices are locked until
-     * the caller's transaction ends: requesting receipts on overlapping invoices in opposite
-     * orders within one host transaction can deadlock (a QueryException), so request one receipt
-     * per transaction.
+     * At most RequestReceipt::MAX_INVOICES invoices per receipt. The invoices, and the receipts
+     * already settling them, stay locked until the transaction ends, and the balance reads take
+     * gap locks: concurrent receipts can deadlock, also on unrelated invoices. Called outside a
+     * transaction, the package retries its own transaction. Called inside a host transaction, the
+     * deadlock surfaces as Laravel's DeadlockException (or a QueryException) with the host
+     * transaction already rolled back by the database: retry the whole unit of work. Keep such a
+     * transaction short and request one receipt per transaction.
      *
      * @param  list<array{0: InvoiceDocument, 1: int}>  $allocations
      *
@@ -202,10 +205,60 @@ class Moloni
         if ($created) {
             $this->dispatch($receipt);
         } elseif ($receipt->status === DocumentStatus::Failed) {
-            $this->retry($receipt);
+            $this->resendRequestedAgain($receipt);
         }
 
         return $receipt;
+    }
+
+    /**
+     * A failed receipt requested again under its key: sent again as retry() does, unless another
+     * call or run got to it first, in which case the row is returned as it now is. A receipt that
+     * no longer fits what its invoices owe is still refused.
+     */
+    private function resendRequestedAgain(InvoiceDocument $receipt): void
+    {
+        $lock = IssueDocument::lockFor($receipt);
+
+        if (! $lock->get()) {
+            $receipt->refresh();
+
+            return;
+        }
+
+        try {
+            $resent = $receipt->getConnection()->transaction(function () use ($receipt) {
+                $current = InvoiceDocument::query()->whereKey($receipt->getKey())->lockForUpdate()->firstOrFail();
+
+                if ($current->status !== DocumentStatus::Failed) {
+                    return false;
+                }
+
+                $this->resetForResend($current);
+
+                return true;
+            });
+        } finally {
+            $lock->release();
+            $receipt->refresh();
+        }
+
+        if ($resent) {
+            $this->dispatch($receipt);
+        }
+    }
+
+    /**
+     * Puts a locked failed row back to Pending with its attempts counted from zero; a receipt only
+     * while its allocations still fit what its invoices owe.
+     */
+    private function resetForResend(InvoiceDocument $current): void
+    {
+        if ($current->type === DocumentType::Receipt) {
+            $this->receipts->assertStillFits($current);
+        }
+
+        $current->fill(['status' => DocumentStatus::Pending, 'error_type' => null, 'error_message' => null, 'attempts' => 0])->save();
     }
 
     /**
@@ -273,11 +326,7 @@ class Moloni
                         throw new MoloniException(__('Only a failed document can be retried.'), FailureType::Validation);
                     }
 
-                    if ($current->type === DocumentType::Receipt) {
-                        $this->receipts->assertStillFits($current);
-                    }
-
-                    $current->fill(['status' => DocumentStatus::Pending, 'error_type' => null, 'error_message' => null, 'attempts' => 0])->save();
+                    $this->resetForResend($current);
                 });
             } catch (UniqueConstraintViolationException) {
                 throw new MoloniException(__('Another live document already exists for :reference.', ['reference' => $document->reference]), FailureType::Validation);

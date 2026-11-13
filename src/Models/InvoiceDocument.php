@@ -222,6 +222,12 @@ class InvoiceDocument extends Model
      * read sees what other transactions committed while this one waited for the invoice locks; a
      * plain read would see the snapshot MySQL's REPEATABLE READ took at the transaction's first read.
      *
+     * The rows read (other live receipts' links and documents) stay X-locked, and the ranges read
+     * gap-locked, until the caller's transaction ends: keep that transaction short, with no HTTP
+     * and no long work inside it. Concurrent allocations are guarded on MySQL/MariaDB (InnoDB);
+     * under PostgreSQL REPEATABLE READ or SERIALIZABLE host transactions the guard is not
+     * guaranteed.
+     *
      * @param  iterable<self>  $invoices  Locked invoices.
      * @return array<int, int> Invoice id => cents still owed, never below zero; zero for other types.
      */

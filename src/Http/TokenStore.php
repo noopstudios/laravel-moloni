@@ -105,8 +105,8 @@ class TokenStore
     {
         try {
             $response = Http::asForm()
-                ->timeout(min((int) config('moloni.timeout'), self::GRANT_TIMEOUT_SECONDS))
-                ->connectTimeout(min((int) config('moloni.connect_timeout'), self::GRANT_CONNECT_TIMEOUT_SECONDS))
+                ->timeout(MoloniConnector::seconds(config('moloni.timeout'), self::GRANT_TIMEOUT_SECONDS))
+                ->connectTimeout(MoloniConnector::seconds(config('moloni.connect_timeout'), self::GRANT_CONNECT_TIMEOUT_SECONDS))
                 ->withQueryParameters($queryParams)
                 ->post($this->config('base_url').'grant/', [
                     'grant_type' => $grantType,
