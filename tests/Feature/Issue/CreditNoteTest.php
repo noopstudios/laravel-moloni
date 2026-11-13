@@ -159,9 +159,11 @@ it('issues a full credit note referencing every line of the invoice', function (
         ->and($inserts[0]->data())->toBe([
             'company_id' => 5,
             'date' => '2026-05-04',
+            'expiration_date' => '2026-05-04',
             'document_set_id' => 44,
             'customer_id' => 301,
             'our_reference' => '#ORDER-1/NC1',
+            'maturity_date_id' => 11,
             'status' => 1,
             'products' => [
                 ['product_id' => 900, 'name' => 'Consulting', 'qty' => 3.0, 'price' => 10.0, 'related_id' => 50001, ...cnTaxes()],
@@ -519,6 +521,19 @@ it('takes the Moloni customer of an adopted origin from Moloni', function () {
     expect(moloniRequests('creditNotes/insert')[0]['customer_id'])->toBe(301)
         ->and($credit?->customer_id)->toBe(301)
         ->and($credit?->status)->toBe(DocumentStatus::Issued);
+});
+
+it('fails the credit note without inserting it when no zero-day maturity date is configured', function () {
+    cnFake(49.2);
+    $origin = cnOrigin();
+    useMoloniSettings(['maturity_dates' => [30 => 12]]);
+
+    $credit = Moloni::creditNote($origin)->fresh();
+
+    expect($credit?->status)->toBe(DocumentStatus::Failed)
+        ->and($credit?->error_type)->toBe(FailureType::Validation->value)
+        ->and($credit?->error_message)->toContain('0 days')
+        ->and(moloniRequests('creditNotes/insert'))->toHaveCount(0);
 });
 
 it('fails when Moloni refuses the credit note', function () {
