@@ -3,6 +3,9 @@
 use Filament\Actions\Action;
 use Filament\Actions\Testing\TestAction;
 use Filament\Facades\Filament;
+use Filament\Infolists\Components\TextEntry;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\SelectFilter;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Http;
@@ -113,6 +116,46 @@ it('lists the documents read-only, filtered by type and status', function () {
     expect(InvoiceDocumentResource::canCreate())->toBeFalse()
         ->and(InvoiceDocumentResource::canEdit($invoice))->toBeFalse()
         ->and(InvoiceDocumentResource::canDelete($invoice))->toBeFalse();
+});
+
+it('shows the type and status labels, the status colour and the filter options', function () {
+    grantMoloniPermission();
+    $proforma = InvoiceDocument::factory()->proforma()->unknown()->create();
+    $invoiceReceipt = InvoiceDocument::factory()->failed()->create(['type' => DocumentType::InvoiceReceipt]);
+
+    $list = Livewire::test(ListInvoiceDocuments::class)
+        ->assertTableColumnFormattedStateSet('type', 'Pro forma invoice', $proforma)
+        ->assertTableColumnFormattedStateSet('type', 'Invoice receipt', $invoiceReceipt)
+        ->assertTableColumnFormattedStateSet('status', 'Awaiting confirmation', $proforma);
+
+    $page = $list->instance();
+    assert($page instanceof ListInvoiceDocuments);
+    $status = $page->getTable()->getColumn('status');
+    $typeFilter = $page->getTable()->getFilter('type');
+    $statusFilter = $page->getTable()->getFilter('status');
+    assert($status instanceof TextColumn && $typeFilter instanceof SelectFilter && $statusFilter instanceof SelectFilter);
+    expect($status->record($proforma)->getColor(DocumentStatus::Unknown))->toBe('warning')
+        ->and($status->record($invoiceReceipt)->getColor(DocumentStatus::Failed))->toBe('danger')
+        ->and($typeFilter->getOptions())->toBe(collect(DocumentType::cases())->mapWithKeys(fn (DocumentType $type) => [$type->value => $type->getLabel()])->all())
+        ->and($statusFilter->getOptions())->toBe(collect(DocumentStatus::cases())->mapWithKeys(fn (DocumentStatus $status) => [$status->value => $status->getLabel()])->all())
+        ->and($typeFilter->getOptions()['proforma'] ?? null)->toBe('Pro forma invoice')
+        ->and($statusFilter->getOptions()['unknown'] ?? null)->toBe('Awaiting confirmation');
+
+    $view = Livewire::test(ViewInvoiceDocument::class, ['record' => $proforma->getKey()])
+        ->assertSee('Pro forma invoice')
+        ->assertSee('Awaiting confirmation');
+
+    $page = $view->instance();
+    assert($page instanceof ViewInvoiceDocument);
+    $entry = function (string $name) use ($page): TextEntry {
+        $entry = $page->getSchema('infolist')?->getComponent(fn ($component): bool => $component instanceof TextEntry && $component->getName() === $name);
+        assert($entry instanceof TextEntry);
+
+        return $entry;
+    };
+    expect($entry('type')->formatState(DocumentType::Proforma))->toBe('Pro forma invoice')
+        ->and($entry('status')->formatState(DocumentStatus::Unknown))->toBe('Awaiting confirmation')
+        ->and($entry('status')->getColor(DocumentStatus::Unknown))->toBe('warning');
 });
 
 it('shows retry only on failed documents and dispatches the job', function () {

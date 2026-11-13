@@ -1,6 +1,6 @@
 # noopstudios/laravel-moloni
 
-Pacote Laravel para emitir documentos fiscais no [Moloni](https://www.moloni.pt) a partir de projetos Laravel 13, com um plugin Filament v5 para as definições e para a gestão dos documentos.
+Pacote Laravel para emitir documentos fiscais no [Moloni](https://www.moloni.pt) a partir de projetos Laravel 13, com um plugin Filament v5 opcional para as definições e para a gestão dos documentos.
 
 > Versão 0.1.0, ainda não publicada. Licença: a definir.
 
@@ -20,8 +20,8 @@ Pede-se um documento (fatura, fatura-recibo, fatura pró-forma, recibo, nota de 
 |---|---|
 | PHP | `^8.3` |
 | Laravel (`illuminate/*`) | `^13.0` |
-| Filament | `^5.0` |
 | spatie/laravel-settings | `^3.0` |
+| Filament (opcional, só para o painel) | `^5.0` |
 
 Bases de dados: **MySQL/MariaDB** (InnoDB). Os testes do pacote usam SQLite. Os recibos e as notas de crédito concorrentes dependem dos bloqueios de linha do InnoDB (`SELECT … FOR UPDATE`); em **PostgreSQL** sob transações do anfitrião em `REPEATABLE READ` ou `SERIALIZABLE` essa proteção não é garantida, pelo que não é suportado para recibos.
 
@@ -31,6 +31,12 @@ Fora da base de dados, são precisos uma fila `database` e uma cache partilhada 
 
 ```bash
 composer require noopstudios/laravel-moloni
+```
+
+O Filament é opcional: o pacote instala-se e emite documentos sem ele. Só é preciso para o painel (página de definições, recurso de documentos e ações). Se o projeto ainda não tem Filament v5 e quer o painel, instale-o também:
+
+```bash
+composer require filament/filament:"^5.0"
 ```
 
 As definições (empresa, séries, métodos de pagamento, etc.) ficam na tabela do `spatie/laravel-settings`. Essa tabela tem de existir antes das migrações do pacote, que inserem as linhas de definições `moloni.*`:
@@ -51,7 +57,7 @@ php artisan vendor:publish --tag=moloni-config
 
 **`schema:load`.** O dump de schema do Laravel (`schema:dump`) guarda a estrutura das tabelas e o conteúdo da tabela `migrations`, mas não as linhas da tabela `settings`. Numa base criada com `schema:load` as migrações de definições contam como executadas e as linhas `moloni.*` não existem: o spatie não consegue ler as definições e o pacote comporta-se como se não houvesse empresa configurada (`No Moloni company is configured`). Nos ambientes em que isto se aplica, crie a base com `php artisan migrate` a partir de uma base vazia e confirme com `php artisan moloni:check`.
 
-Depois, adicione as credenciais ao `.env`, registe o plugin no painel Filament e escolha a empresa no ecrã de definições (ver abaixo).
+Depois, adicione as credenciais ao `.env` e configure a empresa: no ecrã de definições do plugin Filament, se o usar, ou em código (ver [Definições e `moloni:check`](#definições-e-molonicheck)).
 
 ## Variáveis `.env`
 
@@ -106,7 +112,33 @@ O mesmo teste corre na linha de comandos, útil em deploys e em CI:
 php artisan moloni:check   # código de saída 1 se houver problemas
 ```
 
-Se preferir, as definições também se podem preencher em código com a classe `Noop\Moloni\Settings\MoloniSettings`.
+**Sem Filament** não há ecrã de definições: preenchem-se em código com a classe `Noop\Moloni\Settings\MoloniSettings` (por exemplo num seeder ou num comando do projeto) e confirmam-se com `php artisan moloni:check`, que faz a mesma verificação do ecrã. Os ids são os do Moloni (empresa, séries, métodos de pagamento, datas de vencimento, etc.):
+
+```php
+use Noop\Moloni\Settings\MoloniSettings;
+
+$settings = app(MoloniSettings::class);
+
+$settings->company_id = 12345;
+$settings->fiscal_zone = 'PT';                       // PT, PT-AC ou PT-MA
+$settings->document_sets = [
+    'invoice' => 101,                                // obrigatórias: invoice e invoice_receipt
+    'invoice_receipt' => 102,
+    'proforma' => 103,                               // as restantes só para quem as usa
+    'receipt' => 104,
+    'credit_note' => 105,
+];
+$settings->payment_methods = ['card' => 201, 'transfer' => 202];   // chave usada em PaymentData => id no Moloni
+$settings->maturity_dates = [0 => 301, 30 => 302];                 // dias => id; o prazo 0 é obrigatório
+$settings->default_category_id = 401;
+$settings->default_unit_id = 501;
+$settings->default_product_id = null;
+$settings->tax_overrides = [];                       // taxa de IVA => tax_id, opcional
+$settings->exemption_reasons = ['eu_business' => 'M40', 'non_eu_business' => 'M40', 'non_eu_consumer' => 'M44'];
+$settings->vies_unavailable = 'charge';              // charge ou block
+
+$settings->save();
+```
 
 ## Implementar `Invoiceable`
 
@@ -434,7 +466,7 @@ it('handles a lost answer', function () {
 
 ## Plugin Filament e permissões
 
-Registe o plugin no painel:
+Só se aplica se o projeto usar Filament v5 (ver [Instalação](#instalação)). Registe o plugin no painel:
 
 ```php
 use Noop\Moloni\Filament\MoloniPlugin;

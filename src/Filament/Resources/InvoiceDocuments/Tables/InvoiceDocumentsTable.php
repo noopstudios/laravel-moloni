@@ -25,7 +25,8 @@ class InvoiceDocumentsTable
             ->defaultSort('id', 'desc')
             ->columns([
                 TextColumn::make('type')
-                    ->label(__('Document type')),
+                    ->label(__('Document type'))
+                    ->formatStateUsing(fn (DocumentType $state): string => $state->getLabel()),
                 TextColumn::make('document_number')
                     ->label(__('Document number'))
                     ->placeholder(__('Not issued yet'))
@@ -42,7 +43,9 @@ class InvoiceDocumentsTable
                     ->money(fn ($record) => $record->currency, divideBy: 100),
                 TextColumn::make('status')
                     ->label(__('Document status'))
-                    ->badge(),
+                    ->badge()
+                    ->formatStateUsing(fn (DocumentStatus $state): string => $state->getLabel())
+                    ->color(fn (DocumentStatus $state): string => $state->getColor()),
                 TextColumn::make('error_message')
                     ->label(__('Last error'))
                     ->limit(80)
@@ -51,10 +54,10 @@ class InvoiceDocumentsTable
             ->filters([
                 SelectFilter::make('type')
                     ->label(__('Document type'))
-                    ->options(DocumentType::class),
+                    ->options(collect(DocumentType::cases())->mapWithKeys(fn (DocumentType $type): array => [$type->value => $type->getLabel()])->all()),
                 SelectFilter::make('status')
                     ->label(__('Document status'))
-                    ->options(DocumentStatus::class),
+                    ->options(collect(DocumentStatus::cases())->mapWithKeys(fn (DocumentStatus $status): array => [$status->value => $status->getLabel()])->all()),
             ])
             ->recordActions([
                 ViewAction::make()->label(__('View document')),

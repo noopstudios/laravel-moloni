@@ -5,6 +5,8 @@ namespace Noop\Moloni\Filament\Resources\InvoiceDocuments\Schemas;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Schema;
+use Noop\Moloni\Enums\DocumentStatus;
+use Noop\Moloni\Enums\DocumentType;
 
 class InvoiceDocumentInfolist
 {
@@ -14,8 +16,11 @@ class InvoiceDocumentInfolist
             Section::make(__('Moloni document'))
                 ->columns(2)
                 ->schema([
-                    TextEntry::make('type')->label(__('Document type')),
-                    TextEntry::make('status')->label(__('Document status'))->badge(),
+                    TextEntry::make('type')->label(__('Document type'))
+                        ->formatStateUsing(fn (DocumentType $state): string => $state->getLabel()),
+                    TextEntry::make('status')->label(__('Document status'))->badge()
+                        ->formatStateUsing(fn (DocumentStatus $state): string => $state->getLabel())
+                        ->color(fn (DocumentStatus $state): string => $state->getColor()),
                     TextEntry::make('document_number')->label(__('Document number'))->placeholder(__('Not issued yet')),
                     TextEntry::make('reference')->label(__('Document reference')),
                     TextEntry::make('customer_vat')->label(__('VAT number'))->placeholder(__('Final consumer')),

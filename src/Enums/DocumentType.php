@@ -2,9 +2,7 @@
 
 namespace Noop\Moloni\Enums;
 
-use Filament\Support\Contracts\HasLabel;
-
-enum DocumentType: string implements HasLabel
+enum DocumentType: string
 {
     case Proforma = 'proforma';
     case Invoice = 'invoice';

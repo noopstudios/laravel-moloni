@@ -15,7 +15,7 @@ First release (not yet tagged or dated).
 - `moloni:recover` (scheduled every five minutes by the package) for documents whose job was lost, and `moloni:check` for the login, the required settings and every configured Moloni id.
 - Settings stored with spatie/laravel-settings (company, fiscal zone, document sets, payment methods, maturity dates, default category/unit/product, tax overrides, exemption reasons, VIES behaviour), with their migrations loaded by the package.
 - Optional VIES validation behind a replaceable `TaxRule` (`DefaultTaxRule`), with a choice between charging VAT or blocking when VIES is unreachable.
-- Filament v5 plugin (`MoloniPlugin`): a settings page fed by cached Moloni lists, a read-only documents resource and reusable document actions, guarded by the `moloni.permissions.manage` and `moloni.permissions.full_admin` abilities.
+- Optional Filament v5 plugin (`MoloniPlugin`): a settings page fed by cached Moloni lists, a read-only documents resource and reusable document actions, guarded by the `moloni.permissions.manage` and `moloni.permissions.full_admin` abilities. Filament is not required: without it the package installs and issues documents, and the settings are written from code and validated with `moloni:check`.
 - Events `DocumentIssued`, `DocumentFailed` and `DocumentVoided`.
 - `Moloni::fake()` for host application tests, with `assertIssued()`, `assertNothingIssued()`, `assertIssuedCount()` and `failNext()`.
 - Opt-in sandbox suite against a Moloni test company (`vendor/bin/pest --group=sandbox`, see `.env.sandbox.example`).
@@ -31,6 +31,6 @@ The sandbox suite (`vendor/bin/pest --group=sandbox`) checks the package against
 
 #### Requirements
 
-- PHP `^8.3`, Laravel `^13.0`, Filament `^5.0`, spatie/laravel-settings `^3.0`.
+- PHP `^8.3`, Laravel `^13.0`, spatie/laravel-settings `^3.0`; Filament `^5.0` only for the panel (optional).
 - MySQL/MariaDB. Concurrent receipts and credit notes rely on InnoDB locking; PostgreSQL under `REPEATABLE READ` or `SERIALIZABLE` host transactions is not supported for receipts.
 - Licence: not decided yet.
