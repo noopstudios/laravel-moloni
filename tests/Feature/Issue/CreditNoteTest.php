@@ -581,3 +581,14 @@ it('explains a refused credit in Portuguese', function () {
     expect(fn () => Moloni::creditNote($origin, [new CreditLine(0, 4)]))
         ->toThrow(InvalidArgumentException::class, 'A linha 0 de GR/8 só pode ser creditada em mais 3.');
 });
+
+it('numbers credit notes across the documents that share a reference', function () {
+    Http::fake();
+    $origin = cnOrigin();
+    cnPending($origin, [new CreditLine(0, 1)])->fill(['status' => DocumentStatus::Unknown])->save();
+    // A reissue: the new invoice takes the same reference.
+    $origin->fill(['status' => DocumentStatus::Superseded])->save();
+    $reissued = cnOrigin(attributes: ['document_id' => 8002, 'document_number' => 'GR/9']);
+
+    expect(cnPending($reissued, [new CreditLine(0, 1)])->reference)->toBe('#ORDER-1/NC2');
+});

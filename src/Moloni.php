@@ -150,6 +150,7 @@ class Moloni
                 return $proforma->getConnection()->transaction(function () use ($proforma, $invoiceable, $type, $payment, $dueInDays) {
                     $current = InvoiceDocument::query()->whereKey($proforma->getKey())->lockForUpdate()->firstOrFail();
                     $this->assertConvertible($current);
+                    IssueDocument::assertNotBeingCancelled($current);
                     $conversion = $this->conversionOf($current);
 
                     if ($conversion !== null) {
@@ -346,7 +347,7 @@ class Moloni
                         $proforma = InvoiceDocument::query()->whereKey((int) Payload::required($converts, 'proforma_document_id', 'conversion'))->lockForUpdate()->first();
 
                         if ($proforma !== null) {
-                            IssueDocument::assertNotHeld($proforma);
+                            IssueDocument::assertNotBeingCancelled($proforma);
                         }
 
                         // The new document converts the same pro-forma, with its own link. Moloni only
@@ -454,45 +455,78 @@ class Moloni
             $this->assertCancellable($document);
             $documentId = (int) $document->document_id;
 
-            try {
-                $this->client->cancel($documentId, $reason);
-            } catch (MoloniException $e) {
-                if ($e->type === FailureType::Validation) {
-                    throw new MoloniException(__('Moloni refused to cancel :document: :reason', [
-                        'document' => $document->document_number ?? $document->reference,
-                        'reason' => self::reasonOf($e),
-                    ]), FailureType::Validation, $e->errors);
-                }
+            // Writers of dependants refuse while this is held (see IssueDocument::assertNotBeingCancelled()).
+            $cancelling = IssueDocument::cancelLockFor($document);
 
-                if ($e->type !== FailureType::Unknown || ! $this->cancelledInMoloni($documentId)) {
-                    throw $e;
-                }
+            if (! $cancelling->get()) {
+                throw new MoloniException(__('The document :reference is being processed; try again in a moment.', ['reference' => $document->reference]), FailureType::Validation);
             }
 
-            $document->getConnection()->transaction(function () use ($document, $reason) {
-                $current = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
-                $dependants = $this->liveDependants($current);
-
-                // A safety net: writers of dependants refuse while this lock is held, but one that
-                // checked just before may have committed during the call to Moloni.
-                if ($dependants->isNotEmpty()) {
-                    throw new MoloniException(__('Moloni cancelled :document, but :dependants was requested for it meanwhile; check them in Moloni.', [
-                        'document' => $current->document_number ?? $current->reference,
-                        'dependants' => self::describe($dependants),
-                    ]), FailureType::Validation);
-                }
-
-                $current->fill([
-                    'status' => DocumentStatus::Voided,
-                    'payload' => [...($current->payload ?? []), 'void' => ['reason' => $reason, 'at' => now()->toIso8601String()]],
-                ])->save();
-            });
-            $document->refresh();
+            try {
+                $this->cancelInMoloni($document, $documentId, $reason);
+                $this->markVoided($document, $reason);
+            } finally {
+                $cancelling->release();
+            }
         });
 
         Event::dispatch(new DocumentVoided($document));
 
         return $document;
+    }
+
+    /**
+     * Cancels the document in Moloni, or confirms Moloni already shows it cancelled: Moloni
+     * refuses to cancel a cancelled document, so a refusal or an uncertain outcome is read back.
+     */
+    private function cancelInMoloni(InvoiceDocument $document, int $documentId, string $reason): void
+    {
+        try {
+            $this->client->cancel($documentId, $reason);
+        } catch (MoloniException $e) {
+            if (! in_array($e->type, [FailureType::Validation, FailureType::Unknown], true)) {
+                throw $e;
+            }
+
+            if ($this->cancelledInMoloni($documentId)) {
+                return;
+            }
+
+            if ($e->type === FailureType::Validation) {
+                throw new MoloniException(__('Moloni refused to cancel :document: :reason', [
+                    'document' => $document->document_number ?? $document->reference,
+                    'reason' => self::reasonOf($e),
+                ]), FailureType::Validation, $e->errors);
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Marks the document voided once Moloni cancelled it, unless a dependant slipped in.
+     */
+    private function markVoided(InvoiceDocument $document, string $reason): void
+    {
+        $document->getConnection()->transaction(function () use ($document, $reason) {
+            $current = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
+            $dependants = $this->liveDependants($current);
+
+            // A safety net: writers of dependants refuse while this lock is held, but one that
+            // checked just before may have committed during the call to Moloni.
+            if ($dependants->isNotEmpty()) {
+                throw new MoloniException(__('Moloni cancelled :document, but :dependants was requested for it meanwhile; check them in Moloni.', [
+                    'document' => $current->document_number ?? $current->reference,
+                    'dependants' => self::describe($dependants),
+                ]), FailureType::Validation);
+            }
+
+            $current->fill([
+                'status' => DocumentStatus::Voided,
+                'payload' => [...($current->payload ?? []), 'void' => ['reason' => $reason, 'at' => now()->toIso8601String()]],
+            ])->save();
+        });
+        $document->refresh();
     }
 
     private function assertCancellable(InvoiceDocument $document): void

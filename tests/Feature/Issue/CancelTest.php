@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Testing\Fakes\EventFake;
 use Noop\Moloni\Data\CustomerData;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\InvoiceLine;
@@ -117,7 +118,10 @@ it('voids a document when Moloni accepts the cancellation and frees the live slo
 })->with([DocumentType::Invoice, DocumentType::InvoiceReceipt]);
 
 it('throws Validation with Moloni\'s reason when the cancellation is refused', function () {
-    cxFake(['*/documents/documentCancel/*' => ['valid' => 0, 'message' => [['code' => '10 associated_id', 'description' => 'The associated document is not valid.']]]]);
+    cxFake([
+        '*/documents/documentCancel/*' => ['valid' => 0, 'message' => [['code' => '10 associated_id', 'description' => 'The associated document is not valid.']]],
+        '*/documents/getOne/*' => moloniDocumentRow(['document_id' => 8001, 'status' => 1]),
+    ]);
     $document = cxIssued();
 
     $e = catchMoloniException(fn () => Moloni::cancel($document, 'Order cancelled'));
@@ -285,7 +289,7 @@ it('refuses a receipt, credit note or conversion while the document is being can
     Http::fake();
     Queue::fake();
     $document = cxIssued($type);
-    $lock = Cache::lock("moloni-doc-{$document->id}", 150);
+    $lock = Cache::lock("moloni-cancel-{$document->id}", 150);
     $lock->get();
 
     $e = catchMoloniException(fn () => $request($document));
@@ -319,7 +323,7 @@ it('refuses to reissue a conversion while its pro-forma is being cancelled', fun
         'payload' => ['converts' => ['proforma_document_id' => $proforma->id, 'moloni_document_id' => 8001, 'associate' => true]],
     ]);
     InvoiceDocumentLink::create(['document_id' => $invoice->id, 'associated_document_id' => $proforma->id, 'amount_cents' => 12300]);
-    $lock = Cache::lock("moloni-doc-{$proforma->id}", 150);
+    $lock = Cache::lock("moloni-cancel-{$proforma->id}", 150);
     $lock->get();
 
     expect(catchMoloniException(fn () => Moloni::reissue($invoice))->getMessage())->toContain('being processed')
@@ -345,4 +349,48 @@ it('keeps a document Moloni cancelled when a dependant slipped in meanwhile', fu
         ->and($document->fresh()?->status)->toBe(DocumentStatus::Issued)
         ->and($document->fresh()?->payload)->not->toHaveKey('void');
     Event::assertNotDispatched(DocumentVoided::class);
+});
+
+it('voids a document Moloni already shows cancelled when it refuses to cancel it again', function () {
+    cxFake([
+        '*/documents/documentCancel/*' => ['valid' => 0, 'message' => ['1 document']],
+        '*/documents/getOne/*' => moloniDocumentRow(['document_id' => 8001, 'status' => 2]),
+    ]);
+    $document = cxIssued();
+
+    expect(Moloni::cancel($document, 'Order cancelled')->status)->toBe(DocumentStatus::Voided);
+    Event::assertDispatched(DocumentVoided::class);
+});
+
+it('records a receipt while the invoice\'s issuing job holds its lock', function () {
+    // Only the cancellation's own lock refuses receipts and credit notes, not the job's.
+    Http::fake();
+    Queue::fake();
+    $invoice = cxIssued();
+    $lock = Cache::lock("moloni-doc-{$invoice->id}", 150);
+    $lock->get();
+
+    Moloni::receipt(Order::create(), [[$invoice, 1000]], new PaymentData('transfer', Carbon::now(), 1000));
+
+    expect(InvoiceDocumentLink::count())->toBe(1);
+    $lock->release();
+});
+
+it('records a receipt from a listener of the issued invoice', function () {
+    fakeMoloniIssuing();
+    Queue::fake();
+    $order = Order::create(['customer_vat' => '509999999']);
+    $invoice = Moloni::invoice($order);
+    // The real dispatcher, so the listener runs inside the job, which holds the invoice's lock.
+    $fake = Event::getFacadeRoot();
+    Event::swap($fake instanceof EventFake ? $fake->dispatcher : $fake);
+    Event::listen(DocumentIssued::class, function (DocumentIssued $event) {
+        Moloni::receipt(Order::create(), [[$event->document, 12300]], new PaymentData('transfer', Carbon::now(), 12300), 'payment-1');
+    });
+
+    runIssueJob($invoice);
+
+    expect($invoice->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and(InvoiceDocument::where('type', DocumentType::Receipt)->sole()->links()->sole()->amount_cents)->toBe(12300)
+        ->and($invoice->outstandingCents())->toBe(0);
 });

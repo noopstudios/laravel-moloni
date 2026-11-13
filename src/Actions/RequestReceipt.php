@@ -301,7 +301,7 @@ class RequestReceipt
         }
 
         // Not while an invoice is being cancelled (Moloni::cancel() holds its lock).
-        $invoices->each(IssueDocument::assertNotHeld(...));
+        $invoices->each(IssueDocument::assertNotBeingCancelled(...));
 
         return $invoices;
     }

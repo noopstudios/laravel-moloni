@@ -115,7 +115,7 @@ class RequestCreditNote
                     'status' => DocumentStatus::Pending,
                     'company_id' => $companyId,
                     'document_set_id' => $documentSetId,
-                    'reference' => $current->reference.'/NC'.($this->creditNotesOf($current)->count() + 1),
+                    'reference' => $current->reference.'/NC'.($this->creditNotesSharingReference($current) + 1),
                     'currency' => $current->currency,
                     'expected_total_cents' => $total,
                     'customer_vat' => $current->customer_vat,
@@ -318,7 +318,7 @@ class RequestCreditNote
         }
 
         // Not while it is being cancelled (Moloni::cancel() holds its lock).
-        IssueDocument::assertNotHeld($current);
+        IssueDocument::assertNotBeingCancelled($current);
 
         return $current;
     }
@@ -439,6 +439,22 @@ class RequestCreditNote
         return InvoiceDocument::query()
             ->where('type', DocumentType::CreditNote)
             ->whereHas('links', fn (Builder $links) => $links->where('associated_document_id', $origin->getKey()));
+    }
+
+    /**
+     * Every credit note of a document with the origin's reference in its company, whatever its
+     * status: a reissue or a conversion carries the same reference, and two credit notes with
+     * the same reference could be taken for each other when reconciling.
+     */
+    private function creditNotesSharingReference(InvoiceDocument $origin): int
+    {
+        return InvoiceDocument::query()
+            ->where('type', DocumentType::CreditNote)
+            ->whereHas('links.associatedDocument', fn (Builder $documents) => $documents
+                ->where('reference', $origin->reference)
+                ->where('company_id', $origin->company_id)
+                ->whereIn('type', [DocumentType::Invoice, DocumentType::InvoiceReceipt]))
+            ->count();
     }
 
     /**
