@@ -450,12 +450,9 @@ class Moloni
         }
 
         $this->whileHolding($document, function () use ($document, $reason) {
-            // The caller's copy may be stale: the job and the other writers hold this same lock.
-            $document->refresh();
-            $this->assertCancellable($document);
-            $documentId = (int) $document->document_id;
-
             // Writers of dependants refuse while this is held (see IssueDocument::assertNotBeingCancelled()).
+            // Taken before the check below: a writer that found it free has locked the row first,
+            // so the check waits for it to commit and sees its dependant.
             $cancelling = IssueDocument::cancelLockFor($document);
 
             if (! $cancelling->get()) {
@@ -463,6 +460,8 @@ class Moloni
             }
 
             try {
+                $this->assertCancellable($document);
+                $documentId = (int) $document->document_id;
                 $this->cancelInMoloni($document, $documentId, $reason);
                 $this->markVoided($document, $reason);
             } finally {
@@ -529,40 +528,59 @@ class Moloni
         $document->refresh();
     }
 
+    /**
+     * Checks the stored document (the caller's copy may be stale) on its locked row, in a short
+     * transaction committed before Moloni is called, and refreshes the caller's copy.
+     */
     private function assertCancellable(InvoiceDocument $document): void
     {
-        $label = $document->document_number ?? $document->reference;
+        try {
+            $document->getConnection()->transaction(function () use ($document) {
+                $current = InvoiceDocument::query()->whereKey($document->getKey())->lockForUpdate()->firstOrFail();
+                $label = $current->document_number ?? $current->reference;
 
-        if ($document->status !== DocumentStatus::Issued || $document->document_id === null) {
-            throw new MoloniException(__('Only an issued document can be cancelled.'), FailureType::Validation);
-        }
+                if ($current->status !== DocumentStatus::Issued || $current->document_id === null) {
+                    throw new MoloniException(__('Only an issued document can be cancelled.'), FailureType::Validation);
+                }
 
-        if ($document->company_id !== app(MoloniSettings::class)->companyIdOrNull()) {
-            throw new MoloniException(__('The document :document was issued for another Moloni company.', ['document' => $label]), FailureType::Validation);
-        }
+                if ($current->company_id !== app(MoloniSettings::class)->companyIdOrNull()) {
+                    throw new MoloniException(__('The document :document was issued for another Moloni company.', ['document' => $label]), FailureType::Validation);
+                }
 
-        $dependants = $this->liveDependants($document);
+                $dependants = $this->liveDependants($current);
 
-        if ($dependants->isNotEmpty()) {
-            throw new MoloniException(__('Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.', [
-                'document' => $label,
-                'dependants' => self::describe($dependants),
-            ]), FailureType::Validation);
+                if ($dependants->isNotEmpty()) {
+                    throw new MoloniException(__('Cannot cancel :document while other documents depend on it: :dependants. Cancel them first or issue a credit note.', [
+                        'document' => $label,
+                        'dependants' => self::describe($dependants),
+                    ]), FailureType::Validation);
+                }
+            });
+        } finally {
+            $document->refresh();
         }
     }
 
     /**
-     * The live documents acting on this one: receipts and credit notes on it, documents converting it.
+     * The live documents acting on this one: receipts and credit notes on it, documents converting
+     * it. Read with FOR UPDATE through a join (as InvoiceDocument::outstandingCentsForUpdate()
+     * does), so the read sees what writers committed while the caller waited for the row lock.
+     * Call inside the transaction that locked $document.
      *
      * @return Collection<int, InvoiceDocument>
      */
     private function liveDependants(InvoiceDocument $document): Collection
     {
         return InvoiceDocument::query()
-            ->whereIn('status', DocumentStatus::live())
-            ->whereHas('links', fn (Builder $links) => $links->where('associated_document_id', $document->getKey()))
-            ->orderBy('id')
-            ->get();
+            ->select('invoice_documents.*')
+            ->join('invoice_document_links as l', 'l.document_id', '=', 'invoice_documents.id')
+            ->where('l.associated_document_id', $document->getKey())
+            ->whereIn('invoice_documents.status', DocumentStatus::live())
+            ->orderBy('invoice_documents.id')
+            ->lockForUpdate()
+            ->get()
+            ->unique('id')
+            ->values();
     }
 
     /**

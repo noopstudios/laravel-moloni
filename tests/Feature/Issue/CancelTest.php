@@ -351,6 +351,39 @@ it('keeps a document Moloni cancelled when a dependant slipped in meanwhile', fu
     Event::assertNotDispatched(DocumentVoided::class);
 });
 
+it('sees a dependant committed after its writer found the cancellation lock free, before calling Moloni', function () {
+    cxFake();
+    $document = cxIssued();
+    $inserted = false;
+    // A writer that locked the row and found the cancellation lock free just before cancel() took
+    // it: its dependant commits right after, while cancel() goes on.
+    DB::connection()->beforeExecuting(function (string $query) use ($document, &$inserted) {
+        if ($inserted || ! str_contains($query, 'invoice_documents')) {
+            return;
+        }
+
+        $probe = Cache::lock("moloni-cancel-{$document->id}", 1);
+
+        if ($probe->get()) {
+            $probe->release();
+
+            return;
+        }
+
+        $inserted = true;
+        cxDependant($document, DocumentType::Receipt, DocumentStatus::Pending);
+    });
+
+    $e = catchMoloniException(fn () => Moloni::cancel($document, 'Order cancelled'));
+
+    expect($inserted)->toBeTrue()
+        ->and($e->type)->toBe(FailureType::Validation)
+        ->and($e->getMessage())->toContain('#DEP-receipt')
+        ->and($document->fresh()?->status)->toBe(DocumentStatus::Issued);
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'documentCancel'));
+    Event::assertNotDispatched(DocumentVoided::class);
+});
+
 it('voids a document Moloni already shows cancelled when it refuses to cancel it again', function () {
     cxFake([
         '*/documents/documentCancel/*' => ['valid' => 0, 'message' => ['1 document']],
