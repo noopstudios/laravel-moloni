@@ -34,3 +34,37 @@ it('has a pt translation for every key used in the package', function () {
         ->and(translationKeysIn('__(\'It\\\'s "here"\') . Message::get("A \\"quoted\\" key") . __($dynamic)'))
         ->toBe(['It\'s "here"', 'A "quoted" key']);
 });
+
+/**
+ * Where a MoloniException is built with a bare string literal as its message, which no
+ * translation reaches, as "file:line".
+ *
+ * @return list<string>
+ */
+function untranslatedMoloniExceptionsIn(string $source, string $file): array
+{
+    preg_match_all('/new\s+MoloniException\(\s*[\'"]/', $source, $matches, PREG_OFFSET_CAPTURE);
+
+    return array_map(fn (array $match) => $file.':'.(substr_count(substr($source, 0, $match[1]), "\n") + 1), $matches[0]);
+}
+
+it('translates the message of every MoloniException, which operators read', function () {
+    $untranslated = [];
+
+    foreach (Finder::create()->files()->in(__DIR__.'/../../src')->name('*.php') as $file) {
+        array_push($untranslated, ...untranslatedMoloniExceptionsIn($file->getContents(), $file->getRelativePathname()));
+    }
+
+    expect($untranslated)->toBe([])
+        ->and(untranslatedMoloniExceptionsIn(<<<'PHP'
+            throw new MoloniException('Bare.', FailureType::Validation);
+            throw new MoloniException(
+                "Bare {$endpoint}.",
+                FailureType::Validation,
+            );
+            throw new MoloniException(__('Translated.'), FailureType::Validation);
+            throw new MoloniException(Message::get('Translated :x.', ['x' => 1]), FailureType::Validation);
+            throw new MoloniException($message, FailureType::Validation);
+            PHP, 'sample.php'))
+        ->toBe(['sample.php:1', 'sample.php:2']);
+});

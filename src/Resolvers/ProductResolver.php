@@ -7,6 +7,7 @@ use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Support\Message;
 
 /**
  * Turns an invoice line into the Moloni product to issue it with, creating a service product
@@ -36,7 +37,7 @@ class ProductResolver
 
         if ($reference === '') {
             return $this->settings->default_product_id
-                ?? throw new MoloniException("The line \"{$line->name}\" has no product or reference, and no default product is configured.", FailureType::Validation);
+                ?? throw new MoloniException(Message::get('The line ":line" has no product or reference, and no default product is configured.', ['line' => $line->name]), FailureType::Validation);
         }
 
         return $this->resolved[mb_strtolower($reference)] ??= $this->find($reference) ?? $this->create($line, $reference);
@@ -63,9 +64,9 @@ class ProductResolver
     private function create(InvoiceLine $line, string $reference): int
     {
         $categoryId = $this->settings->default_category_id
-            ?? throw new MoloniException("No default product category is configured, so the product {$reference} cannot be created.", FailureType::Validation);
+            ?? throw new MoloniException(Message::get('No default product category is configured, so the product :reference cannot be created.', ['reference' => $reference]), FailureType::Validation);
         $unitId = $this->settings->default_unit_id
-            ?? throw new MoloniException("No default measurement unit is configured, so the product {$reference} cannot be created.", FailureType::Validation);
+            ?? throw new MoloniException(Message::get('No default measurement unit is configured, so the product :reference cannot be created.', ['reference' => $reference]), FailureType::Validation);
 
         $this->taxes->assertExemption($line);
         $tax = $line->isZeroRated()
@@ -100,7 +101,7 @@ class ProductResolver
         if (! is_numeric($result['product_id'] ?? null)) {
             // Created, but the id is missing: look it up once.
             return $this->findAfterLostInsert($reference)
-                ?? throw new MoloniException("Moloni confirmed the product {$reference} without returning its id.", FailureType::Unknown);
+                ?? throw new MoloniException(Message::get('Moloni confirmed the product :reference without returning its id.', ['reference' => $reference]), FailureType::Unknown);
         }
 
         return (int) $result['product_id'];

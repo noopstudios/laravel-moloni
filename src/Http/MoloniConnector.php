@@ -8,6 +8,7 @@ use Illuminate\Http\Client\StrayRequestException;
 use Illuminate\Support\Facades\Http;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
+use Noop\Moloni\Support\Message;
 use SensitiveParameter;
 use Throwable;
 
@@ -87,7 +88,7 @@ class MoloniConnector
             $previous = $result;
         }
 
-        throw new MoloniException("Moloni kept returning pages for {$endpoint}.", FailureType::Transient);
+        throw new MoloniException(Message::get('Moloni kept returning pages for :endpoint.', ['endpoint' => $endpoint]), FailureType::Transient);
     }
 
     /**
@@ -134,12 +135,12 @@ class MoloniConnector
         } catch (Throwable) {
             // Whatever failed, the request may have reached Moloni. The original exception is
             // dropped on purpose: its message can contain the URL with the token.
-            throw new MoloniException("Could not complete the Moloni request to {$endpoint}.", $uncertain);
+            throw new MoloniException(Message::get('Could not complete the Moloni request to :endpoint.', ['endpoint' => $endpoint]), $uncertain);
         }
 
         if ($response->status() === 401) {
             if ($isRetry) {
-                throw new MoloniException("Moloni rejected the access token for {$endpoint}.", FailureType::Authentication);
+                throw new MoloniException(Message::get('Moloni rejected the access token for :endpoint.', ['endpoint' => $endpoint]), FailureType::Authentication);
             }
             // Rejected tokens are not processed, so a write is safe to repeat once with a new token.
             $this->tokens->forget($token);
@@ -148,15 +149,15 @@ class MoloniConnector
         }
 
         if ($response->status() === 403) {
-            throw new MoloniException("Moloni denied access to {$endpoint}.", FailureType::Authentication);
+            throw new MoloniException(Message::get('Moloni denied access to :endpoint.', ['endpoint' => $endpoint]), FailureType::Authentication);
         }
 
         if ($response->serverError()) {
-            throw new MoloniException("Moloni failed while handling {$endpoint}.", $uncertain);
+            throw new MoloniException(Message::get('Moloni failed while handling :endpoint.', ['endpoint' => $endpoint]), $uncertain);
         }
 
         if ($response->status() === 404) {
-            throw new MoloniException("Moloni does not know the endpoint {$endpoint}.", FailureType::Validation);
+            throw new MoloniException(Message::get('Moloni does not know the endpoint :endpoint.', ['endpoint' => $endpoint]), FailureType::Validation);
         }
 
         $body = $response->json();
@@ -170,7 +171,7 @@ class MoloniConnector
             // rest (a timeout, "too early", rate limiting included) can be retried.
             $type = $response->clientError() && ! in_array($response->status(), [408, 425, 429], true) ? FailureType::Validation : FailureType::Transient;
 
-            throw new MoloniException("Moloni returned an unexpected response for {$endpoint}.", $type);
+            throw new MoloniException(Message::get('Moloni returned an unexpected response for :endpoint.', ['endpoint' => $endpoint]), $type);
         }
 
         return $body;
@@ -190,7 +191,7 @@ class MoloniConnector
             }
 
             throw new MoloniException(
-                "Moloni rejected the data sent to {$endpoint}.",
+                Message::get('Moloni rejected the data sent to :endpoint.', ['endpoint' => $endpoint]),
                 FailureType::Validation,
                 $this->redact($this->normaliseErrors($body), $token),
             );
@@ -199,10 +200,10 @@ class MoloniConnector
         if ($response->status() === 400 && is_array($body) && isset($body['error'])) {
             $error = ['code' => $body['error'], 'description' => $body['error_description'] ?? $body['error']];
 
-            throw new MoloniException("Moloni rejected the request to {$endpoint}.", FailureType::Validation, $this->redact([$error], $token));
+            throw new MoloniException(Message::get('Moloni rejected the request to :endpoint.', ['endpoint' => $endpoint]), FailureType::Validation, $this->redact([$error], $token));
         }
 
-        throw new MoloniException("Moloni returned an unexpected response for {$endpoint}.", FailureType::Unknown);
+        throw new MoloniException(Message::get('Moloni returned an unexpected response for :endpoint.', ['endpoint' => $endpoint]), FailureType::Unknown);
     }
 
     /**

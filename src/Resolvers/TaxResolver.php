@@ -7,6 +7,7 @@ use Noop\Moloni\Data\InvoiceLine;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Support\Message;
 
 /**
  * Turns a VAT rate into the Moloni tax to use, and checks the exemption reason of zero-rate lines.
@@ -44,7 +45,7 @@ class TaxResolver
     private function tax(float $rate): array
     {
         if (InvoiceLine::isZeroRate($rate)) {
-            throw new MoloniException('A zero-rate line has no tax; it is sent with an exemption reason instead.', FailureType::Validation);
+            throw new MoloniException(Message::get('A zero-rate line has no tax; it is sent with an exemption reason instead.'), FailureType::Validation);
         }
 
         $taxes = $this->catalog->taxes();
@@ -55,7 +56,7 @@ class TaxResolver
             $row = $taxes->first(fn (array $row) => $this->id($row, 'tax_id') === $override && $this->sameRate($row['value'] ?? null, $rate));
 
             if ($row === null) {
-                throw new MoloniException("The tax {$override} configured for {$this->percent($rate)} is not a {$this->percent($rate)} tax in Moloni.", FailureType::Validation);
+                throw new MoloniException(Message::get('The tax :tax configured for :rate is not a :rate tax in Moloni.', ['tax' => $override, 'rate' => $this->percent($rate)]), FailureType::Validation);
             }
 
             return ['id' => $override, 'rate' => $this->catalogRate($row, $rate)];
@@ -68,7 +69,7 @@ class TaxResolver
             && $this->sameRate($row['value'] ?? null, $rate));
 
         if ($candidates->isEmpty()) {
-            throw new MoloniException("Moloni has no {$this->percent($rate)} VAT tax in the fiscal zone {$zone}.", FailureType::Validation);
+            throw new MoloniException(Message::get('Moloni has no :rate VAT tax in the fiscal zone :zone.', ['rate' => $this->percent($rate), 'zone' => $zone]), FailureType::Validation);
         }
 
         // Accounts can hold taxes identical in every field but the name; only active_by_default may tell them apart.
@@ -77,14 +78,14 @@ class TaxResolver
             : $candidates;
 
         if ($chosen->count() !== 1) {
-            throw new MoloniException("Moloni has more than one {$this->percent($rate)} VAT tax in the fiscal zone {$zone}; choose one in the settings.", FailureType::Validation);
+            throw new MoloniException(Message::get('Moloni has more than one :rate VAT tax in the fiscal zone :zone; choose one in the settings.', ['rate' => $this->percent($rate), 'zone' => $zone]), FailureType::Validation);
         }
 
         $row = $chosen->first();
         $taxId = $this->id($row, 'tax_id');
 
         if ($taxId === null) {
-            throw new MoloniException("Moloni returned the {$this->percent($rate)} VAT tax of the fiscal zone {$zone} without a usable id.", FailureType::Validation);
+            throw new MoloniException(Message::get('Moloni returned the :rate VAT tax of the fiscal zone :zone without a usable id.', ['rate' => $this->percent($rate), 'zone' => $zone]), FailureType::Validation);
         }
 
         return ['id' => $taxId, 'rate' => $this->catalogRate($row, $rate)];
@@ -101,18 +102,18 @@ class TaxResolver
 
         if (! $line->isZeroRated()) {
             if ($code !== null) {
-                throw new MoloniException("The line \"{$line->name}\" is taxed at {$this->percent($line->taxRate)} and cannot carry an exemption reason.", FailureType::Validation);
+                throw new MoloniException(Message::get('The line ":line" is taxed at :rate and cannot carry an exemption reason.', ['line' => $line->name, 'rate' => $this->percent($line->taxRate)]), FailureType::Validation);
             }
 
             return;
         }
 
         if ($code === null) {
-            throw new MoloniException("The zero-rate line \"{$line->name}\" needs an exemption reason.", FailureType::Validation);
+            throw new MoloniException(Message::get('The zero-rate line ":line" needs an exemption reason.', ['line' => $line->name]), FailureType::Validation);
         }
 
         if (! $this->catalog->hasExemption($code)) {
-            throw new MoloniException("The exemption reason {$code} does not exist in Moloni.", FailureType::Validation);
+            throw new MoloniException(Message::get('The exemption reason :code does not exist in Moloni.', ['code' => $code]), FailureType::Validation);
         }
     }
 

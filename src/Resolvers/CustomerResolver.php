@@ -9,6 +9,7 @@ use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Support\Message;
 use Noop\Moloni\Support\Vat;
 
 /**
@@ -66,11 +67,11 @@ class CustomerResolver
         $prefix = config('moloni.prefix');
 
         if (! is_string($prefix) || trim($prefix) === '') {
-            throw new MoloniException('No customer number prefix is configured (moloni.prefix).', FailureType::Validation);
+            throw new MoloniException(Message::get('No customer number prefix is configured (moloni.prefix).'), FailureType::Validation);
         }
 
         if (trim($customer->key) === '') {
-            throw new MoloniException('The customer has no key to build its Moloni number from.', FailureType::Validation);
+            throw new MoloniException(Message::get('The customer has no key to build its Moloni number from.'), FailureType::Validation);
         }
 
         $head = trim($prefix).($customer->createdAt ?? now())->format('y').'-';
@@ -78,13 +79,13 @@ class CustomerResolver
         $room = self::MAX_NUMBER_LENGTH - mb_strlen($head) - mb_strlen($suffix);
 
         if ($room < 1) {
-            throw new MoloniException("The prefix {$prefix} leaves no room for the customer key in a Moloni customer number.", FailureType::Validation);
+            throw new MoloniException(Message::get('The prefix :prefix leaves no room for the customer key in a Moloni customer number.', ['prefix' => $prefix]), FailureType::Validation);
         }
 
         $key = trim($customer->key);
 
         if (mb_strlen($key) > $room) {
-            throw new MoloniException("The customer key {$key} is too long for a Moloni customer number: with the prefix {$prefix} it can have at most {$room} characters.", FailureType::Validation);
+            throw new MoloniException(Message::get('The customer key :key is too long for a Moloni customer number: with the prefix :prefix it can have at most :room characters.', ['key' => $key, 'prefix' => $prefix, 'room' => $room]), FailureType::Validation);
         }
 
         return $head.$key.$suffix;
@@ -93,7 +94,7 @@ class CustomerResolver
     private function generic(): ResolvedCustomer
     {
         $row = $this->pick($this->search('customers/getByNumber', ['number' => self::GENERIC_NUMBER], 'number', self::GENERIC_NUMBER), self::GENERIC_NUMBER)
-            ?? throw new MoloniException('Moloni has no customer numbered '.self::GENERIC_NUMBER.'. Create or keep Moloni\'s generic final-consumer customer with that number to issue documents without billing data.', FailureType::Validation);
+            ?? throw new MoloniException(Message::get('Moloni has no customer numbered :number. Create or keep Moloni\'s generic final-consumer customer with that number to issue documents without billing data.', ['number' => self::GENERIC_NUMBER]), FailureType::Validation);
 
         return $this->resolved($row);
     }
@@ -124,7 +125,7 @@ class CustomerResolver
         $sameVat = $vat === null ? Vat::isFinalConsumer($rowVat) : Vat::normalize($rowVat) === $vat;
 
         if (! $sameVat) {
-            throw new MoloniException("The customer number {$number} already belongs to a customer with a different tax number in Moloni. Change that customer's number in Moloni or use another customer key.", FailureType::Validation);
+            throw new MoloniException(Message::get('The customer number :number already belongs to a customer with a different tax number in Moloni. Change that customer\'s number in Moloni or use another customer key.', ['number' => $number]), FailureType::Validation);
         }
 
         return $row;
@@ -184,7 +185,7 @@ class CustomerResolver
         return match (config('moloni.customer_updates')) {
             'own' => (string) $row['number'] === $number,
             'all' => true,
-            default => throw new MoloniException('moloni.customer_updates must be "own" or "all".', FailureType::Validation),
+            default => throw new MoloniException(Message::get('moloni.customer_updates must be "own" or "all".'), FailureType::Validation),
         };
     }
 
@@ -248,9 +249,9 @@ class CustomerResolver
     private function create(CustomerData $customer, ?string $vat, string $number): ResolvedCustomer
     {
         $maturityDateId = $this->settings->maturity_dates[0]
-            ?? throw new MoloniException("No zero-day maturity date is configured, so the customer {$number} cannot be created.", FailureType::Validation);
+            ?? throw new MoloniException(Message::get('No zero-day maturity date is configured, so the customer :number cannot be created.', ['number' => $number]), FailureType::Validation);
         $paymentMethodId = array_values($this->settings->payment_methods)[0]
-            ?? throw new MoloniException("No payment method is configured, so the customer {$number} cannot be created.", FailureType::Validation);
+            ?? throw new MoloniException(Message::get('No payment method is configured, so the customer :number cannot be created.', ['number' => $number]), FailureType::Validation);
 
         $postalCode = $this->postalCode($customer) ?? ($this->isPortugal($customer) ? self::NO_PORTUGUESE_POSTAL_CODE : null);
         $email = $this->text($customer->email);
@@ -289,7 +290,7 @@ class CustomerResolver
         }
 
         if (! is_numeric($result['customer_id'] ?? null)) {
-            throw new MoloniException("Moloni confirmed the customer {$number} without returning its id.", FailureType::Unknown);
+            throw new MoloniException(Message::get('Moloni confirmed the customer :number without returning its id.', ['number' => $number]), FailureType::Unknown);
         }
 
         return new ResolvedCustomer((int) $result['customer_id'], $number);

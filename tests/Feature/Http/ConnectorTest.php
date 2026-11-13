@@ -296,6 +296,21 @@ it('classifies an unexpected write response as Unknown', function (mixed $body, 
     'too many requests' => [['error' => 'Too Many Requests'], 429],
 ]);
 
+it('explains a failed request in Portuguese', function () {
+    app()->setLocale('pt');
+    Http::fake([
+        '*/grant/*' => moloniGrant(),
+        '*/customers/getAll/*' => Http::response('Not found', 404),
+        '*/customers/insert/*' => Http::response(['valid' => 0, 'message' => [['code' => '1 name', 'description' => 'Name is required.']]]),
+    ]);
+    $connector = connectorWithCompany(5);
+
+    expect(catchMoloniException(fn () => $connector->read('customers/getAll'))->getMessage())
+        ->toBe('O Moloni não conhece o endpoint customers/getAll.')
+        ->and(catchMoloniException(fn () => $connector->write('customers/insert', ['name' => '']))->getMessage())
+        ->toBe('O Moloni rejeitou os dados enviados para customers/insert.');
+});
+
 it('never classifies a failed read as Unknown', function (mixed $body, int $status, FailureType $type) {
     Http::fake([
         '*/grant/*' => moloniGrant(),

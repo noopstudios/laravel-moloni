@@ -9,6 +9,7 @@ use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Http\MoloniConnector;
 use Noop\Moloni\Settings\MoloniSettings;
+use Noop\Moloni\Support\Message;
 
 /**
  * Lookup lists read from Moloni, cached for a day. Company lists are cached per company.
@@ -97,7 +98,7 @@ class MoloniCatalog
         $country = $this->countries()->first(fn (array $row) => $this->sameCode($row['iso_3166_1'] ?? null, $iso));
 
         if ($country === null || ! is_numeric($country['country_id'] ?? null)) {
-            throw new MoloniException("Moloni has no country with the ISO code {$iso}.", FailureType::Validation);
+            throw new MoloniException(Message::get('Moloni has no country with the ISO code :iso.', ['iso' => $iso]), FailureType::Validation);
         }
 
         return (int) $country['country_id'];
@@ -112,7 +113,7 @@ class MoloniCatalog
         $language = $this->languages()->first(fn (array $row) => $this->sameCode($row['code'] ?? null, $code));
 
         if ($language === null || ! is_numeric($language['language_id'] ?? null)) {
-            throw new MoloniException("Moloni has no language with the code {$code}.", FailureType::Validation);
+            throw new MoloniException(Message::get('Moloni has no language with the code :code.', ['code' => $code]), FailureType::Validation);
         }
 
         return (int) $language['language_id'];
@@ -154,7 +155,7 @@ class MoloniCatalog
         $companyId = app(MoloniSettings::class)->companyIdOrNull();
 
         if ($companyId === null) {
-            throw new MoloniException("No Moloni company is configured, so {$endpoint} cannot be read.", FailureType::Validation);
+            throw new MoloniException(Message::get('No Moloni company is configured, so :endpoint cannot be read.', ['endpoint' => $endpoint]), FailureType::Validation);
         }
 
         // Sent explicitly so the request always matches the cache key.

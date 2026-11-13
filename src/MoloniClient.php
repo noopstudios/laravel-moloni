@@ -8,6 +8,7 @@ use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
 use Noop\Moloni\Http\MoloniConnector;
+use Noop\Moloni\Support\Message;
 
 /**
  * Moloni's document endpoints.
@@ -34,7 +35,7 @@ class MoloniClient
         $documentId = $result['document_id'] ?? null;
 
         if (! is_numeric($documentId) || (int) $documentId <= 0) {
-            throw new MoloniException("Moloni confirmed the {$type->value} without returning its id.", FailureType::Unknown);
+            throw new MoloniException(Message::get('Moloni confirmed the :type without returning its id.', ['type' => $type->getLabel()]), FailureType::Unknown);
         }
 
         return (int) $documentId;
@@ -51,7 +52,7 @@ class MoloniClient
         $row = $this->connector->read('documents/getOne', ['document_id' => $documentId]);
 
         if (! is_numeric($row['document_id'] ?? null) || (int) $row['document_id'] !== $documentId) {
-            throw new MoloniException("Moloni has no document {$documentId}.", FailureType::Validation);
+            throw new MoloniException(Message::get('Moloni has no document :id.', ['id' => $documentId]), FailureType::Validation);
         }
 
         /** @var array<string, mixed> $row */
@@ -99,7 +100,7 @@ class MoloniClient
         $url = $result['url'] ?? null;
 
         if (! is_string($url) || $url === '') {
-            throw new MoloniException("Moloni has no PDF for the document {$documentId}; it may be a draft or not exist.", FailureType::Validation);
+            throw new MoloniException(Message::get('Moloni has no PDF for the document :id; it may be a draft or not exist.', ['id' => $documentId]), FailureType::Validation);
         }
 
         return $url;

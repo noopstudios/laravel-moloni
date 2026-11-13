@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Noop\Moloni\Enums\FailureType;
 use Noop\Moloni\Exceptions\MoloniException;
+use Noop\Moloni\Support\Message;
 use SensitiveParameter;
 use Throwable;
 
@@ -35,7 +36,7 @@ class TokenStore
                 return $this->cachedAccessToken() ?? $this->obtainTokens();
             });
         } catch (LockTimeoutException) {
-            throw new MoloniException('Timed out waiting for the Moloni token lock.', FailureType::Transient);
+            throw new MoloniException(Message::get('Timed out waiting for the Moloni token lock.'), FailureType::Transient);
         }
     }
 
@@ -85,7 +86,7 @@ class TokenStore
         ]);
 
         if ($tokens === null) {
-            throw new MoloniException('Moloni refused the login.', FailureType::Authentication);
+            throw new MoloniException(Message::get('Moloni refused the login.'), FailureType::Authentication);
         }
 
         return $this->store($tokens);
@@ -118,7 +119,7 @@ class TokenStore
             throw new StrayRequestException($this->config('base_url').'grant/');
         } catch (Throwable) {
             // The original exception is dropped on purpose: its message may contain request details.
-            throw new MoloniException('Could not connect to Moloni to obtain a token.', FailureType::Transient);
+            throw new MoloniException(Message::get('Could not connect to Moloni to obtain a token.'), FailureType::Transient);
         }
 
         $body = $response->json();
@@ -132,7 +133,7 @@ class TokenStore
             || ! is_array($body)
             || ! is_string($body['access_token'] ?? null)
             || ! is_string($body['refresh_token'] ?? null)) {
-            throw new MoloniException('Moloni did not issue a token.', FailureType::Transient);
+            throw new MoloniException(Message::get('Moloni did not issue a token.'), FailureType::Transient);
         }
 
         return [
