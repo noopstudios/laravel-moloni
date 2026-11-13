@@ -109,8 +109,9 @@ class Moloni
         try {
             $document = $model->getConnection()->transaction(fn () => $this->create(DocumentType::Proforma, $invoiceable, $attributes, $operationKey));
         } catch (UniqueConstraintViolationException $e) {
-            // A concurrent request with the same key created it first.
-            return InvoiceDocument::query()->where('operation_key', $operationKey)->first() ?? throw $e;
+            // A concurrent request with the same key created it first. A locking read: inside a host
+            // transaction a plain read would miss a row committed after its snapshot.
+            return InvoiceDocument::query()->where('operation_key', $operationKey)->lockForUpdate()->first() ?? throw $e;
         }
 
         $this->dispatch($document);
@@ -563,9 +564,13 @@ class Moloni
 
     /**
      * The live documents acting on this one: receipts and credit notes on it, documents converting
-     * it. Read with FOR UPDATE through a join (as InvoiceDocument::outstandingCentsForUpdate()
-     * does), so the read sees what writers committed while the caller waited for the row lock.
-     * Call inside the transaction that locked $document.
+     * it. Call inside the transaction that locked $document, after the row lock.
+     *
+     * A plain read is enough for cancel(), which never runs inside an outer transaction: the
+     * snapshot is taken at the first plain read after the row lock was granted, so it sees every dependant
+     * committed by a writer that held that lock. Locking the dependants would take them after the
+     * origin, the reverse of retry() and resends, and a deadlock there could strand a document
+     * Moloni already cancelled.
      *
      * @return Collection<int, InvoiceDocument>
      */
@@ -577,7 +582,6 @@ class Moloni
             ->where('l.associated_document_id', $document->getKey())
             ->whereIn('invoice_documents.status', DocumentStatus::live())
             ->orderBy('invoice_documents.id')
-            ->lockForUpdate()
             ->get()
             ->unique('id')
             ->values();
@@ -670,8 +674,9 @@ class Moloni
         try {
             $document = $model->getConnection()->transaction(fn () => $this->create($type, $invoiceable, $attributes));
         } catch (UniqueConstraintViolationException $e) {
-            // A concurrent request took the live slot (or the same sequence) first.
-            return $this->live($model) ?? throw $e;
+            // A concurrent request took the live slot (or the same sequence) first. A locking read:
+            // inside a host transaction a plain read would miss a row committed after its snapshot.
+            return InvoiceDocument::query()->where('active_key', InvoiceDocument::activeKeyFor($model))->lockForUpdate()->first() ?? throw $e;
         }
 
         $this->dispatch($document);
