@@ -40,7 +40,8 @@ class MoloniFake extends Moloni
 
     /**
      * Makes the next request end in the state the real flow leaves for this failure, firing
-     * DocumentFailed as it does. Only that request is affected.
+     * DocumentFailed as it does. Only that request is affected: one that returns an existing row
+     * or is refused spends it too.
      */
     public function failNext(FailureType $type): static
     {
@@ -74,35 +75,35 @@ class MoloniFake extends Moloni
     {
         $this->useSettings(null, $dueInDays);
 
-        return parent::invoice($invoiceable, $dueInDays);
+        return $this->once(fn () => parent::invoice($invoiceable, $dueInDays));
     }
 
     public function invoiceReceipt(Invoiceable $invoiceable, PaymentData $payment): InvoiceDocument
     {
         $this->useSettings($payment);
 
-        return parent::invoiceReceipt($invoiceable, $payment);
+        return $this->once(fn () => parent::invoiceReceipt($invoiceable, $payment));
     }
 
     public function proforma(Invoiceable $invoiceable, string $idempotencyKey): InvoiceDocument
     {
         $this->useSettings();
 
-        return parent::proforma($invoiceable, $idempotencyKey);
+        return $this->once(fn () => parent::proforma($invoiceable, $idempotencyKey));
     }
 
     public function convert(InvoiceDocument $proforma, ?PaymentData $payment = null, int $dueInDays = 0): InvoiceDocument
     {
         $this->useSettings($payment, $dueInDays, $proforma->company_id);
 
-        return parent::convert($proforma, $payment, $dueInDays);
+        return $this->once(fn () => parent::convert($proforma, $payment, $dueInDays));
     }
 
     public function receipt(Model $owner, array $allocations, PaymentData $payment, ?string $idempotencyKey = null): InvoiceDocument
     {
         $this->useSettings($payment);
 
-        return parent::receipt($owner, $allocations, $payment, $idempotencyKey);
+        return $this->once(fn () => parent::receipt($owner, $allocations, $payment, $idempotencyKey));
     }
 
     /**
@@ -112,14 +113,35 @@ class MoloniFake extends Moloni
     {
         $this->useSettings();
 
-        return parent::creditNote($document, $lines, $idempotencyKey);
+        return $this->once(fn () => parent::creditNote($document, $lines, $idempotencyKey));
     }
 
     public function reissue(InvoiceDocument $document, ?PaymentData $payment = null, ?int $dueInDays = null): InvoiceDocument
     {
         $this->useSettings($payment ?? $this->frozenPayment($document), $dueInDays ?? 0, $document->company_id);
 
-        return parent::reissue($document, $payment, $dueInDays);
+        return $this->once(fn () => parent::reissue($document, $payment, $dueInDays));
+    }
+
+    public function retry(InvoiceDocument $document): void
+    {
+        $this->useSettings(companyId: $document->company_id);
+
+        $this->once(fn () => parent::retry($document));
+    }
+
+    public function reconcile(InvoiceDocument $document): void
+    {
+        $this->useSettings(companyId: $document->company_id);
+
+        $this->once(fn () => parent::reconcile($document));
+    }
+
+    public function cancel(InvoiceDocument $document, string $reason): InvoiceDocument
+    {
+        $this->useSettings(companyId: $document->company_id);
+
+        return parent::cancel($document, $reason);
     }
 
     public function pdfLink(InvoiceDocument $document): string
@@ -167,6 +189,24 @@ class MoloniFake extends Moloni
      * Nothing is sent to Moloni, so there is nothing to cancel there.
      */
     protected function cancelInMoloni(InvoiceDocument $document, int $documentId, string $reason): void {}
+
+    /**
+     * Runs a request; a failure armed by failNext() is spent by it even when it returns an
+     * existing row or is refused before anything would be sent, so it never hits a later one.
+     *
+     * @template T
+     *
+     * @param  Closure(): T  $request
+     * @return T
+     */
+    private function once(Closure $request): mixed
+    {
+        try {
+            return $request();
+        } finally {
+            $this->nextFailure = null;
+        }
+    }
 
     /**
      * What the issuing job leaves: an uncertain outcome is Unknown, anything else Failed (a

@@ -155,6 +155,42 @@ it('leaves an unknown outcome unknown, reconciles it and retries a failed one', 
     moloniFake()->assertIssuedCount(2);
 });
 
+it('cancels, retries and reconciles rows a host test seeded, whatever their company', function () {
+    $issued = InvoiceDocument::factory()->invoice()->issued()->create(['company_id' => 77, 'document_id' => 5555]);
+    $failed = InvoiceDocument::factory()->invoice()->failed()->create(['company_id' => 77]);
+    $unknown = InvoiceDocument::factory()->receipt()->unknown()->create(['company_id' => 77]);
+
+    expect(Moloni::cancel($issued, 'Order cancelled')->status)->toBe(DocumentStatus::Voided);
+
+    Moloni::retry($failed);
+    Moloni::reconcile($unknown);
+
+    expect($failed->fresh()?->status)->toBe(DocumentStatus::Issued)
+        ->and($unknown->fresh()?->status)->toBe(DocumentStatus::Issued);
+    Event::assertDispatched(DocumentVoided::class);
+});
+
+it('fails only a request that reaches Moloni', function (Closure $request) {
+    $order = Order::create(['customer_vat' => '509999999']);
+    $first = Moloni::invoice($order);
+    moloniFake()->failNext(FailureType::Validation);
+
+    // Returns the live invoice, or is refused, before anything would be sent.
+    try {
+        $request($order);
+    } catch (InvalidArgumentException) {
+    }
+
+    $next = Moloni::invoice(Order::create(['customer_vat' => '509999999']));
+
+    expect($next->status)->toBe(DocumentStatus::Issued)
+        ->and($first->fresh()?->status)->toBe(DocumentStatus::Issued);
+    Event::assertNotDispatched(DocumentFailed::class);
+})->with([
+    'a request returning the live invoice' => [fn (Order $order) => Moloni::invoice($order)],
+    'a request refused before it is recorded' => [fn (Order $order) => Moloni::invoice(Order::create(), -1)],
+]);
+
 it('never dispatches the issuing job', function () {
     Moloni::invoice(Order::create(['customer_vat' => '509999999']));
 
