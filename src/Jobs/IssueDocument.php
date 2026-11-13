@@ -272,7 +272,7 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         try {
             $payload = match ($document->type) {
                 DocumentType::Receipt => $this->receiptPayload($document, $settings, $today),
-                DocumentType::CreditNote => $this->creditNotePayload($document, $client, $settings, $today),
+                DocumentType::CreditNote => $this->creditNotePayload($document, $client, $today),
                 default => $this->payload($document, $customers, $taxes, $products, $settings, $today),
             };
         } catch (MoloniException $e) {
@@ -515,11 +515,9 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
      *
      * @return array<string, mixed>
      */
-    private function creditNotePayload(InvoiceDocument $document, MoloniClient $client, MoloniSettings $settings, CarbonImmutable $today): array
+    private function creditNotePayload(InvoiceDocument $document, MoloniClient $client, CarbonImmutable $today): array
     {
-        // Due today, as the credit note Moloni accepted in the sandbox (it requires an expiration date on inserts).
-        $maturityDateId = $settings->maturity_dates[0]
-            ?? throw new MoloniException(__('No maturity date is configured for :days days.', ['days' => 0]), FailureType::Validation);
+        // No expiration_date or maturity_date_id: Moloni accepts a credit note without them (sandbox).
         $credit = RequestCreditNote::creditOf($document);
         $frozen = InvoiceData::fromArray(Payload::requiredArray($document->payload ?? [], 'invoice', 'credit note'));
         $originInvoice = InvoiceDocument::query()->find($credit['origin_document_id'])?->payload['invoice'] ?? null;
@@ -558,11 +556,9 @@ class IssueDocument implements ShouldBeUnique, ShouldQueue
         return [
             'company_id' => $document->company_id,
             'date' => $today->toDateString(),
-            'expiration_date' => $today->toDateString(),
             'document_set_id' => $document->document_set_id,
             'customer_id' => (int) $customerId,
             'our_reference' => $document->reference,
-            'maturity_date_id' => $maturityDateId,
             'status' => 1,
             'products' => $lines,
             'associated_documents' => [[
