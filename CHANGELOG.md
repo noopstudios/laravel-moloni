@@ -4,6 +4,10 @@ All notable changes to this package are documented here. The format follows [Kee
 
 ## Unreleased
 
+### Fixed
+
+- JSON translations are now loaded in `register()`, so hosts that translate before the provider boots (e.g. while registering a Filament panel) get the package strings.
+
 ## 0.1.0
 
 First release (not yet tagged or dated).

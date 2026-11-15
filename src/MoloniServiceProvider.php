@@ -32,6 +32,8 @@ class MoloniServiceProvider extends ServiceProvider
 
             return $app->make(is_string($rule) && $rule !== '' ? $rule : DefaultTaxRule::class);
         });
+        // In register(): a host that translates before this provider boots would cache the JSON lines without ours.
+        $this->loadJsonTranslationsFrom(__DIR__.'/../resources/lang');
     }
 
     public function boot(): void
@@ -40,7 +42,6 @@ class MoloniServiceProvider extends ServiceProvider
             __DIR__.'/../database/migrations',
             __DIR__.'/../database/settings',
         ]);
-        $this->loadJsonTranslationsFrom(__DIR__.'/../resources/lang');
 
         if ($this->app->runningInConsole()) {
             $this->commands([CheckCommand::class, RecoverCommand::class]);
