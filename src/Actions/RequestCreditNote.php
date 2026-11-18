@@ -196,6 +196,19 @@ class RequestCreditNote
     }
 
     /**
+     * Whether anything is still creditable on the document, to show or hide the action: a plain
+     * read, without locks (it runs while a table renders), and false when it has no recorded lines.
+     */
+    public function hasCreditable(InvoiceDocument $origin): bool
+    {
+        try {
+            return $this->everything($this->remaining($origin, $this->frozenInvoice($origin), lock: false)) !== [];
+        } catch (InvalidArgumentException) {
+            return false;
+        }
+    }
+
+    /**
      * The frozen credit of a credit note.
      *
      * @return array{origin_document_id: int, moloni_document_id: int, lines: list<array{index: int, quantity: float}>, applied_cents: int}
@@ -340,11 +353,12 @@ class RequestCreditNote
      * credit notes (locked here, in ascending id order) credit on it. They are read with FOR UPDATE
      * through a join on their links, as InvoiceDocument::outstandingCentsForUpdate() reads receipts:
      * a subquery on the links (whereHas) would read the snapshot MySQL's REPEATABLE READ took at
-     * the host transaction's first read, and miss a credit note committed since.
+     * the host transaction's first read, and miss a credit note committed since. Without $lock it
+     * is a plain read, for display only.
      *
      * @return array<int, BigDecimal> Line index => quantity.
      */
-    private function remaining(InvoiceDocument $origin, InvoiceData $frozen): array
+    private function remaining(InvoiceDocument $origin, InvoiceData $frozen, bool $lock = true): array
     {
         $remaining = [];
 
@@ -359,7 +373,7 @@ class RequestCreditNote
             ->where('invoice_documents.type', DocumentType::CreditNote)
             ->whereIn('invoice_documents.status', DocumentStatus::live())
             ->orderBy('invoice_documents.id')
-            ->lockForUpdate()
+            ->when($lock, fn ($query) => $query->lockForUpdate())
             ->get()
             ->unique('id');
 

@@ -6,6 +6,7 @@ use Filament\Actions\Action;
 use Filament\Forms\Components\Hidden;
 use Filament\Support\Icons\Heroicon;
 use Illuminate\Support\Str;
+use Noop\Moloni\Actions\RequestCreditNote;
 use Noop\Moloni\Enums\DocumentType;
 use Noop\Moloni\Facades\Moloni;
 use Noop\Moloni\Filament\Actions\Concerns\CallsMoloni;
@@ -33,7 +34,10 @@ class CreditNoteAction extends Action
         $this->label(__('Issue a credit note'))
             ->icon(Heroicon::OutlinedReceiptRefund)
             ->color('danger')
-            ->visible(fn (?InvoiceDocument $record): bool => self::isValidInMoloni($record, [DocumentType::Invoice, DocumentType::InvoiceReceipt]))
+            // Hidden once live credit notes cover every line: the call would only be refused.
+            ->visible(fn (?InvoiceDocument $record): bool => self::isValidInMoloni($record, [DocumentType::Invoice, DocumentType::InvoiceReceipt])
+                && $record !== null
+                && app(RequestCreditNote::class)->hasCreditable($record))
             ->requiresConfirmation()
             ->modalHeading(__('Issue a credit note'))
             ->modalDescription(__('A credit note is issued in Moloni for everything still creditable on this document.'))

@@ -7,6 +7,7 @@ All notable changes to this package are documented here. The format follows [Kee
 ### Fixed
 
 - JSON translations are now loaded in `register()`, so hosts that translate before the provider boots (e.g. while registering a Filament panel) get the package strings.
+- The "Issue a credit note" action is now hidden once live credit notes cover every line of the document.
 
 ## 0.1.0
 

@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Livewire\Livewire;
+use Noop\Moloni\Data\CreditLine;
 use Noop\Moloni\Data\CustomerData;
 use Noop\Moloni\Data\InvoiceData;
 use Noop\Moloni\Data\InvoiceLine;
@@ -223,6 +224,23 @@ it('shows each action only where the manager accepts it', function () {
     }
 });
 
+it('hides the credit note action once live credit notes cover every line', function () {
+    grantMoloniPermission();
+    $fake = Moloni::fake();
+    $invoice = issuedInvoice(['company_id' => 1, 'payload' => ['invoice' => (new InvoiceData(
+        new CustomerData('C1', '509999999', 'Acme Lda', null, null, null, null),
+        [new InvoiceLine('Consulting', 2, '100', 23)],
+    ))->toArray(), 'due_in_days' => 0]]);
+
+    $fake->creditNote($invoice, [new CreditLine(0, 1)]);
+    Livewire::test(ListInvoiceDocuments::class)
+        ->assertActionVisible(TestAction::make('creditNote')->table($invoice));
+
+    $fake->creditNote($invoice);
+    Livewire::test(ListInvoiceDocuments::class)
+        ->assertActionHidden(TestAction::make('creditNote')->table($invoice));
+});
+
 it('requires a reason to reissue an issued document', function () {
     grantMoloniPermission();
     Moloni::fake();
@@ -292,16 +310,16 @@ it('records one credit note when the same form is submitted twice', function () 
     $fake = Moloni::fake();
     $document = $fake->invoice(Order::create(['customer_vat' => '509999999']));
 
-    foreach ([1, 2] as $attempt) {
-        Livewire::test(ViewInvoiceDocument::class, ['record' => $document->getKey()])
-            ->callAction('creditNote', ['idempotency_key' => 'form-1'])
-            ->assertHasNoActionErrors();
-    }
+    // The second form is opened before the first is submitted: once nothing is left the action is hidden.
+    $second = Livewire::test(ViewInvoiceDocument::class, ['record' => $document->getKey()])->mountAction('creditNote');
+    expect($second->instance()->mountedActions[0]['data']['idempotency_key'] ?? null)->toMatch('/^[0-9a-f-]{36}$/');
+
+    Livewire::test(ViewInvoiceDocument::class, ['record' => $document->getKey()])
+        ->callAction('creditNote', ['idempotency_key' => 'form-1'])
+        ->assertHasNoActionErrors();
+    $second->set('mountedActions.0.data.idempotency_key', 'form-1')->callMountedAction();
 
     expect(InvoiceDocument::query()->where('type', DocumentType::CreditNote)->count())->toBe(1);
-
-    $component = Livewire::test(ViewInvoiceDocument::class, ['record' => $document->getKey()])->mountAction('creditNote');
-    expect($component->instance()->mountedActions[0]['data']['idempotency_key'] ?? null)->toMatch('/^[0-9a-f-]{36}$/');
 });
 
 it('offers a full credit note when Moloni refuses the cancellation', function () {
