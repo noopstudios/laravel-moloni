@@ -446,25 +446,42 @@ it('cancels an issued document outside any database transaction', function () {
     expect($document->fresh()?->status)->toBe(DocumentStatus::Voided);
 });
 
-it('redirects the download action to a link fetched at click time', function () {
+it('links the download action to the panel route, opened in a new tab, without asking Moloni first', function () {
+    grantMoloniPermission();
+    Http::fake();
+    $document = issuedInvoice();
+
+    Livewire::test(ListInvoiceDocuments::class)
+        ->assertActionHasUrl(TestAction::make('downloadPdf')->table($document), url("admin/moloni/documents/{$document->getKey()}/pdf"))
+        ->assertActionShouldOpenUrlInNewTab(TestAction::make('downloadPdf')->table($document));
+
+    Http::assertNothingSent();
+});
+
+it('redirects the PDF route to the link Moloni gives for that document at request time', function () {
     grantMoloniPermission();
     useIssueSettings();
     Http::preventStrayRequests();
     Http::fake([
         '*/grant/*' => moloniGrant(),
-        '*/documents/getPDFLink/*' => ['url' => 'https://moloni.example.test/pdf/abc'],
+        '*/documents/getPDFLink/*' => fn (Request $request) => Http::response(['url' => 'https://moloni.example.test/pdf/'.$request['document_id']]),
     ]);
+    issuedInvoice();
+    $document = issuedInvoice(['document_id' => 8002, 'document_number' => 'GR/9']);
+
+    get(route('filament.admin.moloni.documents.pdf', ['document' => $document]))
+        ->assertRedirect('https://moloni.example.test/pdf/8002');
+
+    expect(json_encode($document->fresh()?->toArray()))->not->toContain('moloni.example.test');
+});
+
+it('forbids the PDF route without the permission', function () {
+    Http::fake();
     $document = issuedInvoice();
 
-    $component = Livewire::test(ListInvoiceDocuments::class)
-        ->assertDontSee('moloni.example.test');
-    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'getPDFLink'));
+    get(route('filament.admin.moloni.documents.pdf', ['document' => $document]))->assertForbidden();
 
-    $component->callAction(TestAction::make('downloadPdf')->table($document))
-        ->assertRedirect('https://moloni.example.test/pdf/abc');
-
-    Http::assertSent(fn (Request $request) => str_contains($request->url(), 'getPDFLink') && (int) $request['document_id'] === 8001);
-    expect(json_encode($document->fresh()?->toArray()))->not->toContain('moloni.example.test');
+    Http::assertNothingSent();
 });
 
 it('hides the cancel action from a user without the permission outside the resource', function () {

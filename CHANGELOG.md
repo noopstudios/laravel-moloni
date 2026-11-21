@@ -4,6 +4,10 @@ All notable changes to this package are documented here. The format follows [Kee
 
 ## Unreleased
 
+### Changed
+
+- The "Download PDF" action now opens the PDF in a new tab through a panel route that asks Moloni for the link on click, instead of replacing the panel.
+
 ## 0.1.1 - 2026-11-18
 
 ### Fixed

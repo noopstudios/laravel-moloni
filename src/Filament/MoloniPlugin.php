@@ -5,6 +5,8 @@ namespace Noop\Moloni\Filament;
 use Filament\Contracts\Plugin;
 use Filament\Panel;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Route;
+use Noop\Moloni\Filament\Http\Controllers\DownloadDocumentPdfController;
 use Noop\Moloni\Filament\Pages\ManageMoloniSettings;
 use Noop\Moloni\Filament\Resources\InvoiceDocuments\InvoiceDocumentResource;
 use Noop\Moloni\Models\InvoiceDocument;
@@ -29,7 +31,10 @@ class MoloniPlugin implements Plugin
     {
         $panel
             ->resources([InvoiceDocumentResource::class])
-            ->pages([ManageMoloniSettings::class]);
+            ->pages([ManageMoloniSettings::class])
+            ->authenticatedRoutes(function (): void {
+                Route::get('moloni/documents/{document}/pdf', DownloadDocumentPdfController::class)->name('moloni.documents.pdf');
+            });
 
         // Explicit, so the documents stay guarded when the host guesses policy names its own way;
         // a policy the host registered for the model is kept.

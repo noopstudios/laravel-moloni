@@ -505,7 +505,7 @@ Quem tiver uma das duas habilitações (verificadas com `$user->can()`) vê as d
 
 | Ação | Quando aparece | O que faz |
 |---|---|---|
-| `DownloadPdfAction` | Documento emitido | Redireciona para o PDF (ligação pedida ao Moloni de cada vez). |
+| `DownloadPdfAction` | Documento emitido | Abre o PDF num separador novo, por uma rota do painel que pede a ligação ao Moloni a cada clique; o que o gestor recusa aparece nesse separador como erro 422. |
 | `RetryDocumentAction` | `failed` | `Moloni::retry()`. |
 | `ReconcileDocumentAction` | `unknown` | `Moloni::reconcile()`, com confirmação. |
 | `ConvertProformaAction` | Pró-forma emitida | `Moloni::convert()`: fatura (com prazo) ou fatura-recibo (com método de pagamento). |
